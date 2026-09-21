@@ -234,6 +234,17 @@ class CorpusStore:
             )
         }
 
+    def requester(self, ticket_id: int) -> dict[str, str] | None:
+        """Name and email of whoever raised a ticket, for order matching."""
+        row = self._conn.execute(
+            "SELECT u.name, u.email FROM tickets t "
+            "JOIN users u ON u.id = t.requester_id WHERE t.id = ?",
+            (ticket_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {"name": row["name"] or "", "email": row["email"] or ""}
+
     def comment_bodies(self) -> list[tuple[int, str]]:
         """(comment id, raw body) for every stored comment."""
         return [

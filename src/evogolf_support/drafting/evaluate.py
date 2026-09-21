@@ -86,8 +86,11 @@ def evaluate_ticket(store: CorpusStore, ticket_id: int) -> dict:
     # The evaluation must exercise the same path an agent gets, order lookup
     # included - otherwise it measures a system nobody will actually use.
     subject = ticket["subject"] or ""
+    who = store.requester(ticket_id) or {}
     order_context = shopify.context_for_ticket(
-        f"{subject} {opening['clean_body']}"
+        f"{subject} {opening['clean_body']}",
+        email=who.get("email") or None,
+        name=who.get("name") or None,
     ) or None
 
     draft = draft_reply(

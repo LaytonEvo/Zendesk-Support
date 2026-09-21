@@ -415,6 +415,7 @@ class DraftRequest(BaseModel):
     theme: str | None = None
     order_context: str | None = None
     requester_email: str | None = None
+    requester_name: str | None = None
     lookup_order: bool = True
 
 
@@ -431,7 +432,9 @@ def draft(req: DraftRequest) -> Draft:
         # Best effort: a lookup failure must not stop the draft, it just
         # means the agent fills the figures in instead.
         order_context = shopify.context_for_ticket(
-            f"{req.subject} {req.body}", email=req.requester_email
+            f"{req.subject} {req.body}",
+            email=req.requester_email,
+            name=req.requester_name,
         ) or None
 
     with CorpusStore(path) as store:

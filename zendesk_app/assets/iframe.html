@@ -149,7 +149,7 @@
     outEl.innerHTML = '';
     setStatus('Reading the ticket…');
 
-    client.get(['ticket.subject', 'ticket.description', 'ticket.requester.email'])
+    client.get(['ticket.subject', 'ticket.description', 'ticket.requester.email', 'ticket.requester.name'])
       .then(function (data) {
         return client.metadata().then(function (meta) {
           var base = String(meta.settings.service_url || '').replace(/\/+$/, '');
@@ -166,7 +166,8 @@
             data: JSON.stringify({
               subject: data['ticket.subject'] || '',
               body: data['ticket.description'] || '',
-              requester_email: data['ticket.requester.email'] || null
+              requester_email: data['ticket.requester.email'] || null,
+              requester_name: data['ticket.requester.name'] || null
             })
           });
         });

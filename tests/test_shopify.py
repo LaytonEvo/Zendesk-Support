@@ -221,3 +221,94 @@ def test_no_warning_when_read_all_orders_is_granted(monkeypatch, caplog):
         shopify.access_token()
     assert not any("read_all_orders is NOT granted" in r.message for r in caplog.records)
     assert "read_all_orders" in shopify.granted_scopes()
+
+
+# --- matching by email and name -------------------------------------------
+
+def test_split_name_keeps_the_surname_intact():
+    assert shopify.split_name("Jayman Patel") == ("Jayman", "Patel")
+    assert shopify.split_name("Mary Jane Watson") == ("Mary Jane", "Watson")
+    assert shopify.split_name("Craig") == ("Craig", None)
+    assert shopify.split_name(None) == (None, None)
+    assert shopify.split_name("   ") == (None, None)
+
+
+def test_search_values_cannot_break_out_of_the_quoted_phrase():
+    """Customer text goes into the query string."""
+    assert '"' not in shopify._escape('bad" OR status:any')
+    assert "\\" not in shopify._escape('back\\slash')
+
+
+def test_email_is_quoted_because_it_is_a_tokenised_field(monkeypatch):
+    _creds(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(shopify, "_post",
+                        lambda q, v: seen.update(v) or {"orders": {"nodes": []}})
+    shopify.find_orders(email="jay@example.com")
+    assert seen["query"] == 'email:"jay@example.com"'
+
+
+def test_name_lookup_is_skipped_when_it_is_ambiguous(monkeypatch):
+    """Two customers with the same name must not surface one person's orders."""
+    _creds(monkeypatch)
+    monkeypatch.setattr(shopify, "_post", lambda q, v: {"customers": {"nodes": [
+        {"id": "gid://shopify/Customer/1"}, {"id": "gid://shopify/Customer/2"}]}})
+    assert shopify.find_customer_id(first_name="John", last_name="Smith") is None
+
+
+def test_a_single_name_match_is_used(monkeypatch):
+    _creds(monkeypatch)
+    monkeypatch.setattr(shopify, "_post", lambda q, v: {"customers": {"nodes": [
+        {"id": "gid://shopify/Customer/42"}]}})
+    assert shopify.find_customer_id(first_name="Jayman",
+                                    last_name="Patel") == "gid://shopify/Customer/42"
+
+
+def test_customer_id_search_uses_the_numeric_id(monkeypatch):
+    """Shopify's customer_id filter takes the number, not the gid."""
+    _creds(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(shopify, "_post",
+                        lambda q, v: seen.update(v) or {"orders": {"nodes": []}})
+    shopify.find_orders(customer_id="gid://shopify/Customer/42")
+    assert seen["query"] == "customer_id:42"
+
+
+def test_context_prefers_order_number_then_email_then_name(monkeypatch):
+    """Most certain signal first; a name is the weakest."""
+    _creds(monkeypatch)
+    calls = []
+
+    def fake_find_orders(**kw):
+        calls.append(kw)
+        if kw.get("reference"):
+            return []                     # no order number match
+        if kw.get("email"):
+            return []                     # no email match either
+        return [{"name": "#1", "createdAt": "x", "displayFinancialStatus": "PAID",
+                 "displayFulfillmentStatus": "FULFILLED", "currentTotalPriceSet": None,
+                 "customer": None, "lineItems": {"nodes": []}, "fulfillments": [],
+                 "refunds": [], "returns": {"nodes": []}}]
+
+    monkeypatch.setattr(shopify, "find_orders", fake_find_orders)
+    monkeypatch.setattr(shopify, "find_customer_id", lambda **kw: "gid://shopify/Customer/7")
+
+    out = shopify.context_for_ticket("order 27641 where is it",
+                                     email="a@b.c", name="Jayman Patel")
+    assert "#1" in out
+    assert [set(c) & {"reference", "email", "customer_id"} for c in calls] == [
+        {"reference"}, {"email"}, {"customer_id"}]
+
+
+def test_name_is_not_used_when_email_already_matched(monkeypatch):
+    _creds(monkeypatch)
+    order = {"name": "#9", "createdAt": "x", "displayFinancialStatus": "PAID",
+             "displayFulfillmentStatus": "FULFILLED", "currentTotalPriceSet": None,
+             "customer": None, "lineItems": {"nodes": []}, "fulfillments": [],
+             "refunds": [], "returns": {"nodes": []}}
+    monkeypatch.setattr(shopify, "find_orders",
+                        lambda **kw: [order] if kw.get("email") else [])
+    monkeypatch.setattr(shopify, "find_customer_id",
+                        lambda **kw: pytest.fail("name lookup should not run"))
+    assert "#9" in shopify.context_for_ticket("no order number here",
+                                              email="a@b.c", name="Jayman Patel")

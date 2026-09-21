@@ -55,6 +55,14 @@ query SupportOrderLookup($query: String!, $first: Int!) {
 }
 """
 
+CUSTOMER_QUERY = """
+query SupportCustomerLookup($query: String!) {
+  customers(first: 5, query: $query) {
+    nodes { id firstName lastName numberOfOrders }
+  }
+}
+"""
+
 # Order references as they appear in tickets: "order 27641", "#29103",
 # "WEB-UK31018". Bare 4-6 digit runs are matched only when a cue word is near.
 _ORDER_CUE = re.compile(
@@ -222,23 +230,81 @@ def _post(query: str, variables: dict[str, Any]) -> dict[str, Any]:
     return payload["data"]
 
 
-def find_orders(*, reference: str | None = None, email: str | None = None,
-                limit: int = 2) -> list[dict[str, Any]]:
-    """Orders matching an order number or a customer email."""
-    if not configured():
-        return []
-    if reference:
-        search = f"name:*{reference}*"
-    elif email:
-        search = f"email:{email}"
-    else:
-        return []
+def _escape(value: str) -> str:
+    """Make a value safe inside a Shopify search phrase.
+
+    Customer-supplied text goes into the query string, so quotes and
+    backslashes are neutralised rather than allowed to end the phrase and
+    introduce new filter terms.
+    """
+    return value.replace("\\", "").replace('"', "").strip()
+
+
+def _search_orders(search: str, limit: int) -> list[dict[str, Any]]:
     try:
         data = _post(ORDER_QUERY, {"query": search, "first": limit})
     except Exception as exc:
         log.warning("Shopify lookup failed for %r: %s", search, exc)
         return []
     return data.get("orders", {}).get("nodes", [])
+
+
+def find_customer_id(
+    *, email: str | None = None, first_name: str | None = None,
+    last_name: str | None = None,
+) -> str | None:
+    """Find a single customer by email, or by full name.
+
+    A name match is only trusted when it is unambiguous: two customers called
+    John Smith would otherwise put one person's orders in front of another's.
+    """
+    if not configured():
+        return None
+
+    terms: list[str] = []
+    if email:
+        # email is a tokenized field, so an exact match must be a quoted phrase.
+        terms.append(f'email:"{_escape(email)}"')
+    else:
+        if first_name:
+            terms.append(f'first_name:"{_escape(first_name)}"')
+        if last_name:
+            terms.append(f'last_name:"{_escape(last_name)}"')
+    if not terms:
+        return None
+
+    try:
+        data = _post(CUSTOMER_QUERY, {"query": " AND ".join(terms)})
+    except Exception as exc:
+        log.warning("Shopify customer lookup failed: %s", exc)
+        return None
+
+    nodes = data.get("customers", {}).get("nodes", [])
+    if not nodes:
+        return None
+    if len(nodes) > 1 and not email:
+        log.info(
+            "Name matched %s customers - too ambiguous to use, skipping", len(nodes)
+        )
+        return None
+    return nodes[0].get("id")
+
+
+def find_orders(
+    *, reference: str | None = None, email: str | None = None,
+    customer_id: str | None = None, limit: int = 2,
+) -> list[dict[str, Any]]:
+    """Orders matching an order number, a customer email, or a customer id."""
+    if not configured():
+        return []
+    if reference:
+        return _search_orders(f"name:*{_escape(reference)}*", limit)
+    if email:
+        return _search_orders(f'email:"{_escape(email)}"', limit)
+    if customer_id:
+        numeric = customer_id.rsplit("/", 1)[-1]
+        return _search_orders(f"customer_id:{numeric}", limit)
+    return []
 
 
 def _money(node: Any) -> str:
@@ -293,14 +359,51 @@ def format_for_prompt(orders: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-def context_for_ticket(text: str, *, email: str | None = None) -> str:
-    """Best-effort order context for a ticket. Empty string when unavailable."""
+def context_for_ticket(
+    text: str, *, email: str | None = None, name: str | None = None,
+) -> str:
+    """Best-effort order context for a ticket.
+
+    Tried most to least certain: an order number quoted in the ticket, the
+    requester's email, then their name. A name is the weakest signal and is
+    only used when it identifies exactly one customer.
+    """
     if not configured():
         return ""
+
     for ref in order_references(text):
         orders = find_orders(reference=ref)
         if orders:
+            log.info("Matched order by reference %s", ref)
             return format_for_prompt(orders)
+
     if email:
-        return format_for_prompt(find_orders(email=email, limit=3))
+        orders = find_orders(email=email, limit=3)
+        if orders:
+            log.info("Matched %s order(s) by requester email", len(orders))
+            return format_for_prompt(orders)
+
+    first, last = split_name(name)
+    if first or last:
+        customer_id = find_customer_id(first_name=first, last_name=last)
+        if customer_id:
+            orders = find_orders(customer_id=customer_id, limit=3)
+            if orders:
+                log.info("Matched %s order(s) by requester name", len(orders))
+                return format_for_prompt(orders)
+
     return ""
+
+
+def split_name(name: str | None) -> tuple[str | None, str | None]:
+    """Split a display name into first and last.
+
+    Middle names go with the first name so the surname - the more selective
+    half - stays intact.
+    """
+    parts = [p for p in (name or "").replace(",", " ").split() if p]
+    if not parts:
+        return None, None
+    if len(parts) == 1:
+        return parts[0], None
+    return " ".join(parts[:-1]), parts[-1]
