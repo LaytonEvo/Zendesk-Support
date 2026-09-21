@@ -49,19 +49,22 @@ class _Row(BaseModel):
 
 
 def _ambiguous_rows(store: CorpusStore) -> list[_Row]:
-    placeholders = ",".join("?" * len(AMBIGUOUS_THEMES))
+    # Named parameters throughout: this query has two placeholder groups in
+    # different clauses, and positional binding pairs them by position in the
+    # SQL text, not by the order they are appended. Getting that wrong
+    # compares author ids against theme names and matches nothing - a silent
+    # no-op indistinguishable from "there was nothing to re-classify".
     agent_ids = store.agent_ids()
+    params: dict[str, object] = {
+        f"theme{i}": t for i, t in enumerate(AMBIGUOUS_THEMES)
+    }
+    placeholders = ",".join(f":theme{i}" for i in range(len(AMBIGUOUS_THEMES)))
     agent_clause = ""
-    # SQLite binds "?" by position in the SQL text. The agent placeholders sit
-    # in the SELECT subquery, which comes BEFORE the theme placeholders in the
-    # WHERE - so they must be bound first. Getting this backwards swaps author
-    # ids with theme names and silently matches nothing.
-    params: list[object] = []
     if agent_ids:
-        agent_ph = ",".join("?" * len(agent_ids))
+        for i, aid in enumerate(sorted(agent_ids)):
+            params[f"agent{i}"] = aid
+        agent_ph = ",".join(f":agent{i}" for i in range(len(agent_ids)))
         agent_clause = f"AND c.author_id NOT IN ({agent_ph})"
-        params.extend(sorted(agent_ids))
-    params.extend(AMBIGUOUS_THEMES)
 
     # The earliest non-agent comment is the customer's opening message.
     sql = f"""
@@ -77,7 +80,7 @@ def _ambiguous_rows(store: CorpusStore) -> list[_Row]:
         WHERE th.theme_key IN ({placeholders})
         ORDER BY t.id
     """
-    rows = store._conn.execute(sql, tuple(params)).fetchall()  # noqa: SLF001
+    rows = store._conn.execute(sql, params).fetchall()  # noqa: SLF001
 
     out: list[_Row] = []
     for row in rows:

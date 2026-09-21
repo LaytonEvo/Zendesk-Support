@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from ..config import ConfigError, corpus_path, redact_pii
 from ..corpus.evidence import threads_for
@@ -31,6 +32,8 @@ from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.themes import report as theme_report
 from ..mining.discover import Taxonomy, classify_tickets, discover_themes
 from ..mining.run import GUIDE_KEY, run_mining
+from ..drafting.generate import Draft, draft_reply
+from ..drafting.retrieve import rebuild_index
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -102,6 +105,7 @@ def _run_export(**kwargs: Any) -> None:
             "errors": len(result.errors),
         }
         log.info("Export finished: %s", _export_state["last_result"])
+        rebuild_search_index()
         log_quality_report()
     except ConfigError as exc:
         # Expected before the Zendesk credentials are set - a stack trace here
@@ -248,6 +252,18 @@ def log_requested_evidence() -> None:
         log.warning("Could not assemble evidence: %s", exc)
 
 
+def rebuild_search_index() -> None:
+    """Keep retrieval in step with the corpus. Cheap - no API calls."""
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            rebuild_index(store)
+    except Exception as exc:
+        log.warning("Could not rebuild the search index: %s", exc)
+
+
 def log_quality_report() -> None:
     """Log corpus coverage and cleaning stats - counts only, no content."""
     try:
@@ -306,6 +322,7 @@ def kick_off_first_export() -> None:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     reclean_if_rules_changed()
+    rebuild_search_index()
     log_quality_report()
     log_requested_evidence()
     kick_off_first_export()
@@ -340,6 +357,37 @@ def stats() -> dict[str, Any]:
         "last_export": _export_state["last_result"],
         "last_error": _export_state["last_error"],
     }
+
+
+class DraftRequest(BaseModel):
+    subject: str = ""
+    body: str
+    theme: str | None = None
+    order_context: str | None = None
+
+
+@app.post("/draft", dependencies=[Depends(require_admin)])
+def draft(req: DraftRequest) -> Draft:
+    """Draft a reply for a ticket. Never sends; an agent reviews every draft."""
+    path = corpus_path()
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
+    if not req.body.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "body is required.")
+    with CorpusStore(path) as store:
+        return draft_reply(
+            store,
+            subject=req.subject,
+            body=req.body,
+            theme=req.theme,
+            order_context=req.order_context,
+        )
+
+
+@app.post("/reindex", dependencies=[Depends(require_admin)])
+def reindex() -> dict[str, int]:
+    with CorpusStore(corpus_path()) as store:
+        return {"indexed": rebuild_index(store)}
 
 
 @app.get("/quality", dependencies=[Depends(require_admin)])
