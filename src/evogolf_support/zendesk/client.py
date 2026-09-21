@@ -27,6 +27,10 @@ class ZendeskError(RuntimeError):
     """A Zendesk API call failed in a way we cannot retry."""
 
 
+class ZendeskNotFound(ZendeskError):
+    """The record is gone - typically a ticket deleted since it was exported."""
+
+
 class ZendeskClient:
     def __init__(self, config: ZendeskConfig | None = None, *, timeout: float = 30.0):
         self.config = config or ZendeskConfig.from_env()
@@ -74,6 +78,9 @@ class ZendeskClient:
                     "ZENDESK_EMAIL and ZENDESK_API_TOKEN, and that API token "
                     "access is enabled in Admin Center."
                 )
+
+            if response.status_code == 404:
+                raise ZendeskNotFound(f"Zendesk 404 on {path}")
 
             if response.status_code >= 400:
                 raise ZendeskError(

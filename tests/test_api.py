@@ -146,3 +146,11 @@ def test_missing_credentials_are_reported_without_a_traceback(monkeypatch, caplo
     assert app_module._export_state["running"] is False
     # A ConfigError must not be logged with exception info.
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_httpx_request_logging_is_quieted():
+    """One line per request would bury the export's own progress lines."""
+    import logging
+
+    app_module.configure_logging()
+    assert logging.getLogger("httpx").level == logging.WARNING

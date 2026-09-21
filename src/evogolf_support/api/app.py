@@ -42,6 +42,10 @@ def configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         force=True,
     )
+    # httpx logs a line per request; across a ~1,400-call export that buries
+    # the progress lines that actually say how far along we are.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Guards against a second export starting while one is already running.
 _export_lock = threading.Lock()
@@ -86,6 +90,7 @@ def _run_export(**kwargs: Any) -> None:
             "tickets": result.tickets,
             "comments": result.comments,
             "users": result.users,
+            "deleted": result.deleted,
             "resumed": result.resumed,
             "errors": len(result.errors),
         }

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from ..config import corpus_path, redact_pii
 from ..corpus.clean import clean_body
 from ..corpus.store import CorpusStore
-from .client import ZendeskClient
+from .client import ZendeskClient, ZendeskNotFound
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class ExportResult:
     tickets: int = 0
     comments: int = 0
     users: int = 0
+    deleted: int = 0
     resumed: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -70,8 +71,21 @@ def run_export(
                 store.upsert_ticket(ticket)
                 result.tickets += 1
 
+                # The incremental export includes tickets deleted since they
+                # were created. Their comments are gone, so asking for them
+                # just 404s - expected, and not something to report as an error.
+                if (ticket.get("status") or "").lower() == "deleted":
+                    result.deleted += 1
+                    store.replace_comments(ticket_id, [])
+                    continue
+
                 try:
                     comments = client.ticket_comments(ticket_id)
+                except ZendeskNotFound:
+                    # Deleted between the export page and this call, or otherwise
+                    # unreadable. Same situation as above.
+                    result.deleted += 1
+                    comments = []
                 except Exception as exc:  # keep going; one bad ticket is not fatal
                     msg = f"ticket {ticket_id}: {exc}"
                     log.warning("Could not fetch comments for %s", msg)

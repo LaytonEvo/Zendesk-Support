@@ -118,3 +118,52 @@ def test_comments_paginate_with_cursor():
     client = make_client(handler)
     comments = client.ticket_comments(42)
     assert [c["id"] for c in comments] == [1, 2]
+
+
+def test_404_raises_the_not_found_subclass():
+    from evogolf_support.zendesk.client import ZendeskNotFound
+
+    client = make_client(lambda r: httpx.Response(404, json={"error": "RecordNotFound"}))
+    with pytest.raises(ZendeskNotFound):
+        client.ticket_comments(999)
+
+
+def test_deleted_tickets_are_counted_separately_from_errors(tmp_path, monkeypatch):
+    """A ticket deleted in Zendesk is expected, not a failure to report."""
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
+    monkeypatch.setenv("ZENDESK_SUBDOMAIN", "test")
+    monkeypatch.setenv("ZENDESK_EMAIL", "a@b.c")
+    monkeypatch.setenv("ZENDESK_API_TOKEN", "tok")
+
+    from evogolf_support.zendesk import export as export_module
+    from evogolf_support.zendesk.client import ZendeskNotFound
+
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def verify(self): return {"name": "Evolution Golf", "role": "admin"}
+        def incremental_tickets(self, start_time, cursor=None):
+            yield {
+                "tickets": [
+                    {"id": 1, "status": "solved"},
+                    {"id": 2, "status": "deleted"},   # skipped without an API call
+                    {"id": 3, "status": "open"},      # 404s on comments
+                ],
+                "after_cursor": "c1",
+                "end_of_stream": True,
+            }
+        def ticket_comments(self, ticket_id):
+            if ticket_id == 2:
+                raise AssertionError("must not fetch comments for a deleted ticket")
+            if ticket_id == 3:
+                raise ZendeskNotFound("Zendesk 404 on /tickets/3/comments.json")
+            return [{"id": 10, "body": "Hi", "public": True, "author_id": 5}]
+        def users(self, ids): return [{"id": 5, "name": "Brad", "role": "agent"}]
+
+    monkeypatch.setattr(export_module, "ZendeskClient", lambda *a, **k: FakeClient())
+    result = export_module.run_export(full=True)
+
+    assert result.tickets == 3
+    assert result.deleted == 2
+    assert result.errors == []      # deletions are not errors
+    assert result.comments == 1

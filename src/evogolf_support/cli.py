@@ -37,6 +37,8 @@ def cmd_export(args: argparse.Namespace) -> int:
         f"\nExported {result.tickets} tickets and {result.comments} comments "
         f"({result.users} users){' [resumed]' if result.resumed else ''}."
     )
+    if result.deleted:
+        print(f"  {result.deleted} ticket(s) were deleted in Zendesk - no comments to fetch.")
     if result.errors:
         print(f"  {len(result.errors)} ticket(s) had problems:")
         for err in result.errors[:10]:
