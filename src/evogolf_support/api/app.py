@@ -14,6 +14,7 @@ phase 3.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -24,6 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import ConfigError, corpus_path, redact_pii
+from ..corpus.evidence import threads_for
 from ..corpus.quality import report as quality_report
 from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.themes import report as theme_report
@@ -219,6 +221,33 @@ def kick_off_discovery() -> None:
     threading.Thread(target=_run_discovery, daemon=True).start()
 
 
+def log_requested_evidence() -> None:
+    """Log full threads for the tickets named in EVIDENCE_TICKETS.
+
+    Used to assemble the evidence pack that sits behind each open decision in
+    the voice guide. Logging keeps the corpus behind the service's existing
+    auth rather than opening a public endpoint for it.
+    """
+    raw = os.environ.get("EVIDENCE_TICKETS", "").strip()
+    if not raw:
+        return
+    try:
+        ids = [int(part) for part in raw.replace(" ", "").split(",") if part]
+    except ValueError:
+        log.warning("EVIDENCE_TICKETS is not a comma-separated list of ids")
+        return
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            for thread in threads_for(store, ids):
+                log.info("evidence/%s: %s", thread["id"], json.dumps(thread))
+        log.info("evidence/done: %s tickets", len(ids))
+    except Exception as exc:
+        log.warning("Could not assemble evidence: %s", exc)
+
+
 def log_quality_report() -> None:
     """Log corpus coverage and cleaning stats - counts only, no content."""
     try:
@@ -278,6 +307,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     reclean_if_rules_changed()
     log_quality_report()
+    log_requested_evidence()
     kick_off_first_export()
     kick_off_discovery()
     yield

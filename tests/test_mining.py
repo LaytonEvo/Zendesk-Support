@@ -112,3 +112,34 @@ def test_reclassify_binds_parameters_in_sql_text_order(tmp_path):
     assert sorted(r.ticket_id for r in rows) == [1, 2, 3]
     for row in rows:
         assert "Where is my order?" in row.text
+
+
+def test_evidence_threads_are_dated_and_speaker_labelled(tmp_path):
+    """Reviewing a decision means reading who said what, and when."""
+    from evogolf_support.corpus.evidence import threads_for
+
+    with _corpus(tmp_path) as store:
+        store.upsert_ticket({"id": 1143, "subject": "Return", "status": "closed",
+                             "created_at": "2026-03-04T09:00:00Z"})
+        store.set_ticket_themes({1143: "returns_exchanges_refunds"})
+        store.replace_comments(1143, [
+            {"id": 1, "author_id": 9, "public": True, "body": "b",
+             "created_at": "2026-03-04T09:00:00Z", "clean_body": "Can I return these?"},
+            {"id": 2, "author_id": 5, "public": True, "body": "b",
+             "created_at": "2026-03-04T11:30:00Z", "clean_body": "At the buyer's expense."},
+        ])
+        threads = threads_for(store, [1143])
+
+    assert len(threads) == 1
+    t = threads[0]
+    assert t["id"] == 1143 and t["theme"] == "returns_exchanges_refunds"
+    assert [m["who"] for m in t["messages"]] == ["CUSTOMER", "AGENT"]
+    assert t["messages"][0]["at"] == "2026-03-04T09:00:00Z"
+    assert t["messages"][1]["text"] == "At the buyer's expense."
+
+
+def test_evidence_for_no_tickets_is_empty(tmp_path):
+    from evogolf_support.corpus.evidence import threads_for
+
+    with _corpus(tmp_path) as store:
+        assert threads_for(store, []) == []
