@@ -121,8 +121,12 @@ def draft_reply(
     body: str,
     theme: str | None = None,
     order_context: str | None = None,
+    exclude_ticket_id: int | None = None,
 ) -> Draft:
-    examples = similar(store, f"{subject} {body}", theme=theme, limit=6)
+    examples = similar(
+        store, f"{subject} {body}", theme=theme, limit=6,
+        exclude_ticket_id=exclude_ticket_id,
+    )
 
     # With no theme given, borrow the one from the closest match.
     if theme is None and examples:

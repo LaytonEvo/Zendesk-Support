@@ -180,3 +180,62 @@ def test_theme_filtered_search_binds_parameters_correctly(tmp_path):
             hits = similar(store, "battery charge trolley shoes bag tracking",
                            theme=theme)
             assert [h["id"] for h in hits] == expected, theme
+
+
+def test_a_ticket_is_never_retrieved_as_its_own_example(tmp_path):
+    """Evaluation leakage: retrieving the answer you are predicting.
+
+    Without the exclusion the top hit for a ticket is the ticket itself, and
+    the drafts look far better than they are.
+    """
+    with _corpus(tmp_path) as store:
+        rebuild_index(store)
+        text = "battery will not charge on my trolley"
+        assert similar(store, text)[0]["id"] == 1
+        assert 1 not in [h["id"] for h in similar(store, text, exclude_ticket_id=1)]
+
+
+def test_evaluation_samples_only_answered_support_tickets(tmp_path):
+    from evogolf_support.drafting.evaluate import sample_tickets
+
+    with _corpus(tmp_path) as store:
+        # Spam, and a ticket nobody answered: neither is a fair test case.
+        store.upsert_ticket({"id": 90, "subject": "SEO offer", "status": "closed",
+                             "created_at": "2026-09-01T00:00:00Z"})
+        store.set_ticket_themes({90: "b2b_supplier_marketing_pitches"})
+        store.replace_comments(90, [
+            {"id": 900, "author_id": 9, "public": True, "body": "b", "clean_body": "backlinks?"},
+            {"id": 901, "author_id": 5, "public": True, "body": "b", "clean_body": "no thanks"}])
+        store.upsert_ticket({"id": 91, "subject": "Ignored", "status": "closed",
+                             "created_at": "2026-09-01T00:00:00Z"})
+        store.replace_comments(91, [
+            {"id": 910, "author_id": 9, "public": True, "body": "b", "clean_body": "hello?"}])
+
+        ids = sample_tickets(store, limit=20)
+
+    assert 90 not in ids and 91 not in ids
+    assert sorted(ids) == [1, 2, 3]
+
+
+def test_evaluation_hides_the_team_reply_from_the_draft(tmp_path, monkeypatch):
+    """The draft must see only the customer's opening message."""
+    from evogolf_support.drafting import evaluate as ev
+
+    seen = {}
+
+    def fake_draft(store, **kw):
+        seen.update(kw)
+        from evogolf_support.drafting.generate import Draft
+        return Draft(hand_to_agent=False, handover_reason="", draft="d",
+                     confidence="high", rules_applied=[], tickets_referenced=[],
+                     agent_notes=[])
+
+    monkeypatch.setattr(ev, "draft_reply", fake_draft)
+    with _corpus(tmp_path) as store:
+        result = ev.evaluate_ticket(store, 1)
+
+    assert seen["body"] == "battery will not charge on my trolley"
+    assert seen["exclude_ticket_id"] == 1
+    assert "we can help" in result["team_actually_replied"].lower()
+    # The actual reply is recorded for comparison, never fed to the model.
+    assert result["team_actually_replied"] not in str(seen)

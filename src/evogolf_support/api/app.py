@@ -35,6 +35,7 @@ from ..mining.run import GUIDE_KEY, run_mining
 from ..drafting.generate import Draft, draft_reply
 from ..drafting.retrieve import rebuild_index
 from ..drafting import shopify
+from ..drafting.evaluate import run_evaluation
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -265,6 +266,32 @@ def rebuild_search_index() -> None:
         log.warning("Could not rebuild the search index: %s", exc)
 
 
+def run_requested_evaluation() -> None:
+    """Draft against real solved tickets when DRAFT_SAMPLE is set.
+
+    The only honest check of the system: would this draft have been a
+    reasonable reply to a ticket the team already answered?
+    """
+    raw = os.environ.get("DRAFT_SAMPLE", "").strip()
+    if not raw:
+        return
+    try:
+        limit = int(raw)
+    except ValueError:
+        log.warning("DRAFT_SAMPLE must be a number")
+        return
+    theme = os.environ.get("DRAFT_SAMPLE_THEME", "").strip() or None
+
+    def worker() -> None:
+        try:
+            with CorpusStore(corpus_path()) as store:
+                run_evaluation(store, limit, theme)
+        except Exception as exc:
+            log.warning("Evaluation failed: %s", exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def log_quality_report() -> None:
     """Log corpus coverage and cleaning stats - counts only, no content."""
     try:
@@ -326,6 +353,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     rebuild_search_index()
     log_quality_report()
     log_requested_evidence()
+    run_requested_evaluation()
     kick_off_first_export()
     kick_off_discovery()
     yield

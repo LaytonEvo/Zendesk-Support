@@ -96,9 +96,19 @@ def _query_terms(text: str, limit: int = 40) -> str:
 
 
 def similar(
-    store: CorpusStore, text: str, *, theme: str | None = None, limit: int = 6
+    store: CorpusStore,
+    text: str,
+    *,
+    theme: str | None = None,
+    limit: int = 6,
+    exclude_ticket_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Past tickets most like this text, best first."""
+    """Past tickets most like this text, best first.
+
+    ``exclude_ticket_id`` keeps a ticket out of its own results. Without it an
+    evaluation retrieves the very reply it is supposed to be predicting, and
+    the drafts look far better than they are.
+    """
     query = _query_terms(text)
     if not query:
         return []
@@ -110,6 +120,10 @@ def similar(
         # text, and positional binding silently pairs them the wrong way
         # round - matching nothing and looking like "no similar tickets".
         params: dict[str, Any] = {"query": query, "limit": limit}
+        exclude_clause = ""
+        if exclude_ticket_id is not None:
+            exclude_clause = "AND f.ticket_id != :exclude"
+            params["exclude"] = exclude_ticket_id
         theme_join = ""
         if theme:
             theme_join = (
@@ -121,7 +135,7 @@ def similar(
             f"""
             SELECT f.ticket_id, bm25(ticket_fts) AS score
             FROM ticket_fts f {theme_join}
-            WHERE ticket_fts MATCH :query
+            WHERE ticket_fts MATCH :query {exclude_clause}
             ORDER BY score
             LIMIT :limit
             """,
