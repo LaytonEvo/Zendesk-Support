@@ -27,7 +27,8 @@ from ..config import ConfigError, corpus_path, redact_pii
 from ..corpus.quality import report as quality_report
 from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.themes import report as theme_report
-from ..mining.discover import classify_tickets, discover_themes
+from ..mining.discover import Taxonomy, classify_tickets, discover_themes
+from ..mining.run import GUIDE_KEY, run_mining
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -157,12 +158,31 @@ def _run_discovery() -> None:
                 log.info("discovered/theme %s: %s", theme.key, theme.definition)
             log.info("discovered/counts: %s", store.theme_counts())
             log.info("discovered/agent_replies: %s", store.theme_agent_replies())
+            run_mining(store, taxonomy)
     except ConfigError as exc:
         _mine_state["error"] = str(exc)
         log.error("Theme discovery not started: %s", exc)
     except Exception as exc:
         _mine_state["error"] = str(exc)
         log.exception("Theme discovery failed: %s", exc)
+    finally:
+        _mine_state["running"] = False
+        _mine_lock.release()
+
+
+def _resume_mining(taxonomy: Taxonomy) -> None:
+    if not _mine_lock.acquire(blocking=False):
+        return
+    _mine_state.update(running=True, error=None)
+    try:
+        with CorpusStore(corpus_path()) as store:
+            run_mining(store, taxonomy)
+    except ConfigError as exc:
+        _mine_state["error"] = str(exc)
+        log.error("Mining not started: %s", exc)
+    except Exception as exc:
+        _mine_state["error"] = str(exc)
+        log.exception("Mining failed: %s", exc)
     finally:
         _mine_state["running"] = False
         _mine_lock.release()
@@ -178,10 +198,18 @@ def kick_off_discovery() -> None:
         if not path.exists():
             return
         with CorpusStore(path) as store:
-            if store.get_state(TAXONOMY_KEY):
-                log.info("Taxonomy already stored; skipping discovery")
+            if store.get_state(GUIDE_KEY):
+                log.info("Voice guide already stored; nothing to mine")
                 return
             if store.stats()["tickets"] == 0:
+                return
+            if store.get_state(TAXONOMY_KEY):
+                # Discovery already ran; resume at mining rather than redoing it.
+                log.info("Taxonomy stored but no guide - resuming at mining")
+                taxonomy = Taxonomy.model_validate_json(store.get_state(TAXONOMY_KEY))
+                threading.Thread(
+                    target=_resume_mining, args=(taxonomy,), daemon=True
+                ).start()
                 return
     except Exception as exc:
         log.warning("Could not check for a stored taxonomy: %s", exc)
