@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -449,9 +450,28 @@ def reindex() -> dict[str, int]:
         return {"indexed": rebuild_index(store)}
 
 
-@app.get("/shopify/install", dependencies=[Depends(require_admin)])
-def shopify_install(request: Request) -> RedirectResponse:
-    """Start the one-off install of the app on the store."""
+@app.get("/shopify/install")
+def shopify_install(request: Request, token: str = "") -> RedirectResponse:
+    """Start the one-off install of the app on the store.
+
+    A browser cannot send an Authorization header from the address bar, and
+    the Shopify approval screen needs a browser, so this endpoint also accepts
+    the admin token as a query parameter. That puts it in browser history, so
+    the response carries Referrer-Policy: no-referrer to keep it out of the
+    Referer header on the hop to Shopify - and the token should be rotated
+    once the install is done.
+    """
+    admin = _admin_token()
+    if not admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "ADMIN_TOKEN is not set, so this endpoint is disabled.",
+        )
+    header = request.headers.get("authorization", "")
+    supplied = token or (header[7:] if header.lower().startswith("bearer ") else "")
+    if not supplied or not secrets.compare_digest(supplied, admin):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
+
     shop = shopify_oauth.expected_shop()
     if not shopify_oauth.valid_shop(shop):
         raise HTTPException(
@@ -461,7 +481,10 @@ def shopify_install(request: Request) -> RedirectResponse:
     redirect_uri = str(request.url_for("shopify_callback")).replace("http://", "https://")
     nonce = shopify_oauth.new_nonce()
     log.info("Starting Shopify install for %s, redirecting to Shopify", shop)
-    return RedirectResponse(shopify_oauth.install_url(shop, redirect_uri, nonce))
+    return RedirectResponse(
+        shopify_oauth.install_url(shop, redirect_uri, nonce),
+        headers={"Referrer-Policy": "no-referrer"},
+    )
 
 
 @app.get("/shopify/callback", name="shopify_callback")

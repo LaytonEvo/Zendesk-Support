@@ -158,3 +158,48 @@ def test_stored_token_takes_precedence_over_the_org_grant(client, monkeypatch):
     monkeypatch.setattr(shopify, "_fetch_token", boom)
     assert shopify.access_token() == "installed-token"
     assert shopify.installed() is True
+
+
+# --- browser-initiated install -------------------------------------------
+
+def test_install_accepts_the_token_as_a_query_parameter(client):
+    """A browser cannot send an Authorization header from the address bar."""
+    r = client.get("/shopify/install", params={"token": "tok"}, follow_redirects=False)
+    assert r.status_code in (302, 307)
+    assert r.headers["location"].startswith(f"https://{SHOP}/admin/oauth/authorize")
+
+
+def test_install_redirect_suppresses_the_referrer(client):
+    """The token is in the URL, so it must not travel to Shopify in Referer."""
+    r = client.get("/shopify/install", params={"token": "tok"}, follow_redirects=False)
+    assert r.headers.get("Referrer-Policy") == "no-referrer"
+
+
+def test_install_still_accepts_a_bearer_header(client):
+    r = client.get("/shopify/install", headers={"Authorization": "Bearer tok"},
+                   follow_redirects=False)
+    assert r.status_code in (302, 307)
+
+
+def test_install_rejects_a_wrong_query_token(client):
+    assert client.get("/shopify/install", params={"token": "wrong"},
+                      follow_redirects=False).status_code == 401
+
+
+def test_install_rejects_no_token_at_all(client):
+    assert client.get("/shopify/install", follow_redirects=False).status_code == 401
+
+
+def test_install_is_disabled_when_no_admin_token_is_set(env, monkeypatch):
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    with TestClient(app_module.app) as c:
+        r = c.get("/shopify/install", params={"token": "anything"},
+                  follow_redirects=False)
+    assert r.status_code == 403
+
+
+def test_query_token_is_not_accepted_on_other_endpoints(client):
+    """The query-token concession applies only to the browser install flow."""
+    assert client.get("/stats", params={"token": "tok"}).status_code == 401
+    assert client.post("/draft", params={"token": "tok"},
+                       json={"body": "x"}).status_code == 401
