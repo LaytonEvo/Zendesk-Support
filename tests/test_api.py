@@ -154,3 +154,27 @@ def test_httpx_request_logging_is_quieted():
 
     app_module.configure_logging()
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def test_quality_endpoint_requires_admin(client):
+    assert client.get("/quality").status_code == 403
+
+
+def test_quality_report_contains_no_message_content(tmp_path, monkeypatch):
+    """The report must be safe to log and paste - counts only."""
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
+    from evogolf_support.config import corpus_path
+    from evogolf_support.corpus.quality import report
+    from evogolf_support.corpus.store import CorpusStore
+
+    secret = "Jayman's trolley was collected from 12 Example Street"
+    with CorpusStore(corpus_path()) as store:
+        store.upsert_ticket({"id": 1, "status": "solved", "created_at": "2026-01-01"})
+        store.replace_comments(
+            1, [{"id": 1, "author_id": 5, "public": True, "body": secret,
+                 "clean_body": secret}]
+        )
+        rendered = repr(report(store))
+
+    assert "Jayman" not in rendered
+    assert "Example Street" not in rendered

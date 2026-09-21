@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import ConfigError, corpus_path
+from ..corpus.quality import report as quality_report
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -95,6 +96,7 @@ def _run_export(**kwargs: Any) -> None:
             "errors": len(result.errors),
         }
         log.info("Export finished: %s", _export_state["last_result"])
+        log_quality_report()
     except ConfigError as exc:
         # Expected before the Zendesk credentials are set - a stack trace here
         # would bury the one line that says what to do about it.
@@ -106,6 +108,19 @@ def _run_export(**kwargs: Any) -> None:
     finally:
         _export_state["running"] = False
         _export_lock.release()
+
+
+def log_quality_report() -> None:
+    """Log corpus coverage and cleaning stats - counts only, no content."""
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            for section, values in quality_report(store).items():
+                log.info("quality/%s: %s", section, values)
+    except Exception as exc:
+        log.warning("Could not build the quality report: %s", exc)
 
 
 def _saved_cursor() -> str | None:
@@ -150,6 +165,7 @@ def kick_off_first_export() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    log_quality_report()
     kick_off_first_export()
     yield
 
@@ -181,6 +197,16 @@ def stats() -> dict[str, Any]:
         "last_export": _export_state["last_result"],
         "last_error": _export_state["last_error"],
     }
+
+
+@app.get("/quality", dependencies=[Depends(require_admin)])
+def quality() -> dict[str, Any]:
+    """Coverage and cleaning measurements. Counts only - no message content."""
+    path = corpus_path()
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
+    with CorpusStore(path) as store:
+        return quality_report(store)
 
 
 @app.post("/export", status_code=status.HTTP_202_ACCEPTED,

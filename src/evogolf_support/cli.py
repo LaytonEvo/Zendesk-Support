@@ -58,6 +58,20 @@ def cmd_stats(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_quality(_: argparse.Namespace) -> int:
+    import json
+
+    from .corpus.quality import report
+
+    path = corpus_path()
+    if not path.exists():
+        print(f"No corpus yet at {path}. Run: evogolf export")
+        return 1
+    with CorpusStore(path) as store:
+        print(json.dumps(report(store), indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evogolf", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -73,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     export.set_defaults(func=cmd_export)
 
     sub.add_parser("stats", help="summarise the local corpus").set_defaults(func=cmd_stats)
+    sub.add_parser(
+        "quality", help="coverage and cleaning measurements (no message content)"
+    ).set_defaults(func=cmd_quality)
 
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
