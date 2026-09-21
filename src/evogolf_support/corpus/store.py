@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS users (
     role    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS ticket_themes (
+    ticket_id   INTEGER PRIMARY KEY,
+    theme_key   TEXT NOT NULL,
+    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_themes_key ON ticket_themes(theme_key);
+
 CREATE TABLE IF NOT EXISTS export_state (
     key     TEXT PRIMARY KEY,
     value   TEXT
@@ -190,6 +197,42 @@ class CorpusStore:
             "SELECT id FROM users WHERE role IN ('agent','admin')"
         ).fetchall()
         return {r["id"] for r in rows}
+
+    def set_ticket_themes(self, assignments: dict[int, str]) -> None:
+        with self._tx() as conn:
+            conn.executemany(
+                "INSERT INTO ticket_themes (ticket_id, theme_key) VALUES (?,?) "
+                "ON CONFLICT(ticket_id) DO UPDATE SET theme_key=excluded.theme_key",
+                list(assignments.items()),
+            )
+
+    def theme_counts(self) -> dict[str, int]:
+        return {
+            r["theme_key"]: r["n"]
+            for r in self._conn.execute(
+                "SELECT theme_key, COUNT(*) AS n FROM ticket_themes "
+                "GROUP BY theme_key ORDER BY n DESC"
+            )
+        }
+
+    def theme_agent_replies(self) -> dict[str, int]:
+        """Agent replies available per theme - the evidence behind each rule."""
+        agent_ids = self.agent_ids()
+        if not agent_ids:
+            return {}
+        placeholders = ",".join("?" * len(agent_ids))
+        return {
+            r["theme_key"]: r["n"]
+            for r in self._conn.execute(
+                f"SELECT t.theme_key, COUNT(*) AS n "
+                f"FROM ticket_themes t "
+                f"JOIN comments c ON c.ticket_id = t.ticket_id "
+                f"WHERE c.author_id IN ({placeholders}) "
+                f"AND TRIM(COALESCE(c.clean_body, '')) != '' "
+                f"GROUP BY t.theme_key ORDER BY n DESC",
+                tuple(sorted(agent_ids)),
+            )
+        }
 
     def comment_bodies(self) -> list[tuple[int, str]]:
         """(comment id, raw body) for every stored comment."""

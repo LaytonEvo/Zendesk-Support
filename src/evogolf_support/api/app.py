@@ -27,6 +27,7 @@ from ..config import ConfigError, corpus_path, redact_pii
 from ..corpus.quality import report as quality_report
 from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.themes import report as theme_report
+from ..mining.discover import classify_tickets, discover_themes
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -131,6 +132,65 @@ def reclean_if_rules_changed() -> None:
         log.warning("Could not re-clean the corpus: %s", exc)
 
 
+TAXONOMY_KEY = "taxonomy"
+
+_mine_lock = threading.Lock()
+_mine_state: dict[str, Any] = {"running": False, "error": None}
+
+
+def _run_discovery() -> None:
+    """Discover the theme taxonomy and classify every ticket.
+
+    Costs a handful of Opus calls, so it runs once and the result is stored.
+    """
+    if not _mine_lock.acquire(blocking=False):
+        return
+    _mine_state.update(running=True, error=None)
+    try:
+        with CorpusStore(corpus_path()) as store:
+            taxonomy = discover_themes(store)
+            store.set_state(TAXONOMY_KEY, taxonomy.model_dump_json())
+            assignments = classify_tickets(store, taxonomy)
+            store.set_ticket_themes(assignments)
+            log.info("discovered/notes: %s", taxonomy.notes)
+            for theme in taxonomy.themes:
+                log.info("discovered/theme %s: %s", theme.key, theme.definition)
+            log.info("discovered/counts: %s", store.theme_counts())
+            log.info("discovered/agent_replies: %s", store.theme_agent_replies())
+    except ConfigError as exc:
+        _mine_state["error"] = str(exc)
+        log.error("Theme discovery not started: %s", exc)
+    except Exception as exc:
+        _mine_state["error"] = str(exc)
+        log.exception("Theme discovery failed: %s", exc)
+    finally:
+        _mine_state["running"] = False
+        _mine_lock.release()
+
+
+def kick_off_discovery() -> None:
+    """Run theme discovery once, when the corpus has tickets but no taxonomy."""
+    if os.environ.get("AUTO_MINE", "true").strip().lower() not in {"1", "true", "yes"}:
+        log.info("AUTO_MINE disabled; not running theme discovery")
+        return
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            if store.get_state(TAXONOMY_KEY):
+                log.info("Taxonomy already stored; skipping discovery")
+                return
+            if store.stats()["tickets"] == 0:
+                return
+    except Exception as exc:
+        log.warning("Could not check for a stored taxonomy: %s", exc)
+        return
+
+    log.info("No taxonomy stored - discovering themes from the corpus")
+    threading.Thread(target=_run_discovery, daemon=True).start()
+
+
 def log_quality_report() -> None:
     """Log corpus coverage and cleaning stats - counts only, no content."""
     try:
@@ -191,6 +251,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     reclean_if_rules_changed()
     log_quality_report()
     kick_off_first_export()
+    kick_off_discovery()
     yield
 
 

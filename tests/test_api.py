@@ -178,3 +178,64 @@ def test_quality_report_contains_no_message_content(tmp_path, monkeypatch):
 
     assert "Jayman" not in rendered
     assert "Example Street" not in rendered
+
+
+def test_discovery_is_skipped_when_a_taxonomy_is_already_stored(tmp_path, monkeypatch):
+    """Discovery costs real API calls - it must run once, not on every deploy."""
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
+    monkeypatch.setenv("AUTO_MINE", "true")
+    from evogolf_support.config import corpus_path
+    from evogolf_support.corpus.store import CorpusStore
+
+    with CorpusStore(corpus_path()) as store:
+        store.upsert_ticket({"id": 1, "status": "closed"})
+        store.set_state(app_module.TAXONOMY_KEY, '{"themes": [], "notes": ""}')
+
+    started: list[int] = []
+    monkeypatch.setattr(app_module, "_run_discovery", lambda: started.append(1))
+    app_module.kick_off_discovery()
+    assert started == []
+
+
+def test_discovery_is_skipped_on_an_empty_corpus(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
+    monkeypatch.setenv("AUTO_MINE", "true")
+    from evogolf_support.config import corpus_path
+    from evogolf_support.corpus.store import CorpusStore
+
+    with CorpusStore(corpus_path()) as store:
+        store.stats()
+
+    started: list[int] = []
+    monkeypatch.setattr(app_module, "_run_discovery", lambda: started.append(1))
+    app_module.kick_off_discovery()
+    assert started == []
+
+
+def test_auto_mine_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
+    monkeypatch.setenv("AUTO_MINE", "false")
+    started: list[int] = []
+    monkeypatch.setattr(app_module, "_run_discovery", lambda: started.append(1))
+    app_module.kick_off_discovery()
+    assert started == []
+
+
+def test_discovery_runs_when_tickets_exist_and_no_taxonomy(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
+    monkeypatch.setenv("AUTO_MINE", "true")
+    from evogolf_support.config import corpus_path
+    from evogolf_support.corpus.store import CorpusStore
+
+    with CorpusStore(corpus_path()) as store:
+        store.upsert_ticket({"id": 1, "status": "closed"})
+
+    started: list[int] = []
+    monkeypatch.setattr(app_module, "_run_discovery", lambda: started.append(1))
+    app_module.kick_off_discovery()
+    for _ in range(100):
+        if started:
+            break
+        import time
+        time.sleep(0.01)
+    assert started == [1]
