@@ -1,0 +1,23 @@
+# Secrets - never commit
+.env
+*.pem
+*.key
+
+# Exported customer data - never commit (GDPR)
+data/
+*.sqlite3
+*.db
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
