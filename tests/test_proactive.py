@@ -255,7 +255,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_preview_opens_with_a_token_in_the_url(client, monkeypatch):
-    monkeypatch.setattr(detect, "find_at_risk", lambda: [_item()])
+    monkeypatch.setattr(detect, "find_at_risk", lambda **kw: [_item()])
     r = client.get("/proactive/preview", params={"token": "tok"})
     assert r.status_code == 200
     assert "#29457" in r.text and "Craig Whitfield" in r.text
@@ -268,7 +268,7 @@ def test_preview_rejects_a_wrong_token(client):
 
 
 def test_preview_says_so_when_nothing_is_late(client, monkeypatch):
-    monkeypatch.setattr(detect, "find_at_risk", lambda: [])
+    monkeypatch.setattr(detect, "find_at_risk", lambda **kw: [])
     r = client.get("/proactive/preview", params={"token": "tok"})
     assert "Nothing is running late" in r.text
 
@@ -277,7 +277,7 @@ def test_preview_escapes_order_and_customer_data(client, monkeypatch):
     """Order and customer text comes from Shopify and lands in a page."""
     item = _item()
     item.customer_name = '<script>alert(1)</script>'
-    monkeypatch.setattr(detect, "find_at_risk", lambda: [item])
+    monkeypatch.setattr(detect, "find_at_risk", lambda **kw: [item])
     r = client.get("/proactive/preview", params={"token": "tok"})
     assert "<script>alert(1)</script>" not in r.text
     assert "&lt;script&gt;" in r.text
@@ -285,7 +285,7 @@ def test_preview_escapes_order_and_customer_data(client, monkeypatch):
 
 def test_the_browser_reachable_endpoint_can_never_raise_a_ticket(client, monkeypatch):
     """A GET can be re-requested by a prefetcher or a bookmark."""
-    monkeypatch.setattr(detect, "find_at_risk", lambda: [_item()])
+    monkeypatch.setattr(detect, "find_at_risk", lambda **kw: [_item()])
     monkeypatch.setattr(run, "raise_ticket",
                         lambda item, draft: pytest.fail("preview must not raise tickets"))
     assert client.get("/proactive/preview", params={"token": "tok"}).status_code == 200
@@ -356,3 +356,33 @@ def test_undispatched_orders_are_unaffected_by_the_feed_question(monkeypatch):
     orders.append(_order("#5", MON))          # paid, never dispatched
     found = _run_detect(monkeypatch, orders, now)
     assert [(f.order_name, f.reason) for f in found] == [("#5", "not_dispatched")]
+
+
+def test_thresholds_can_be_lowered_to_prove_the_detector_fires(monkeypatch):
+    """A detector that has never returned a result is untested, not correct."""
+    now = MON + dt.timedelta(days=1)          # one working day old
+    orders = [_order("#1", MON)]              # paid, undispatched
+
+    monkeypatch.setattr(detect.shopify, "configured", lambda: True)
+    monkeypatch.setattr(detect.shopify, "_post",
+                        lambda q, v: {"orders": {"nodes": orders}})
+
+    assert detect.find_at_risk(now=now) == []                       # default: 3 days
+    lowered = detect.find_at_risk(now=now, unfulfilled_days=1)
+    assert [f.reason for f in lowered] == ["not_dispatched"]
+
+
+def test_a_negative_threshold_cannot_be_smuggled_in(monkeypatch):
+    now = MON + dt.timedelta(days=1)
+    monkeypatch.setattr(detect.shopify, "configured", lambda: True)
+    monkeypatch.setattr(detect.shopify, "_post",
+                        lambda q, v: {"orders": {"nodes": [_order("#1", MON)]}})
+    found = detect.find_at_risk(now=now, unfulfilled_days=-5)
+    assert [f.reason for f in found] == ["not_dispatched"]   # clamped to 0, not negative
+
+
+def test_the_override_is_not_available_on_the_real_sweep():
+    """Only the dry-run preview can change thresholds."""
+    import inspect
+    from evogolf_support.proactive.run import run_sweep
+    assert set(inspect.signature(run_sweep).parameters) == {"dry_run"}

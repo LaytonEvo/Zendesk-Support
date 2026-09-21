@@ -146,8 +146,25 @@ def status_summary(limit: int = 100) -> dict[str, int]:
     return counts
 
 
-def find_at_risk(now: dt.datetime | None = None, limit: int = 100) -> list[AtRisk]:
-    """Orders that warrant an unprompted message."""
+def find_at_risk(
+    now: dt.datetime | None = None,
+    limit: int = 100,
+    unfulfilled_days: int | None = None,
+    transit_days: int | None = None,
+) -> list[AtRisk]:
+    """Orders that warrant an unprompted message.
+
+    The day thresholds can be overridden for a positive control: a detector
+    that has never returned a result looks the same whether it is correct or
+    quietly broken, so being able to lower the bar and watch it fire is worth
+    having. Overrides are only reachable from the dry-run preview.
+    """
+    unfulfilled_after = (
+        UNFULFILLED_WORKING_DAYS if unfulfilled_days is None else max(0, unfulfilled_days)
+    )
+    transit_after = (
+        IN_TRANSIT_WORKING_DAYS if transit_days is None else max(0, transit_days)
+    )
     if not shopify.configured():
         log.warning("Shopify is not configured - cannot look for delayed orders")
         return []
@@ -203,7 +220,7 @@ def find_at_risk(now: dt.datetime | None = None, limit: int = 100) -> list[AtRis
 
         if fulfilment in ("UNFULFILLED", "PARTIALLY_FULFILLED") and not fulfillments:
             age = working_days_between(created, now)
-            if age >= UNFULFILLED_WORKING_DAYS:
+            if age >= unfulfilled_after:
                 out.append(AtRisk(
                     reason="not_dispatched",
                     detail=f"Paid {age} working days ago and still not dispatched",
@@ -229,7 +246,7 @@ def find_at_risk(now: dt.datetime | None = None, limit: int = 100) -> list[AtRis
                     break
                 shipped = _parse(f.get("createdAt")) or created
                 age = working_days_between(shipped, now)
-                if age >= IN_TRANSIT_WORKING_DAYS:
+                if age >= transit_after:
                     out.append(AtRisk(
                         reason="stuck_in_transit",
                         detail=f"Shipped {age} working days ago, not yet delivered",

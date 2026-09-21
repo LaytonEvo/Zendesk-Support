@@ -451,7 +451,12 @@ def draft(req: DraftRequest) -> Draft:
 
 
 @app.get("/proactive/preview")
-def proactive_preview(request: Request, token: str = "") -> Response:
+def proactive_preview(
+    request: Request,
+    token: str = "",
+    unfulfilled_days: int | None = None,
+    transit_days: int | None = None,
+) -> Response:
     """Show what the delay sweep would flag, as a readable page.
 
     Deliberately GET-and-dry-run-only. A URL can be re-requested by a browser,
@@ -472,7 +477,9 @@ def proactive_preview(request: Request, token: str = "") -> Response:
     from ..proactive.detect import TERMINAL_STATUSES, find_at_risk, status_summary
 
     try:
-        at_risk = find_at_risk()
+        at_risk = find_at_risk(
+            unfulfilled_days=unfulfilled_days, transit_days=transit_days
+        )
         statuses = status_summary()
     except Exception as exc:
         log.exception("Delay preview failed: %s", exc)
@@ -515,8 +522,10 @@ def proactive_preview(request: Request, token: str = "") -> Response:
 created and no customer has been contacted.</p>
 {'<table><tr><th>Order</th><th>Customer</th><th>Reason</th><th>Detail</th><th>Items</th></tr>'
  + rows + '</table>' if at_risk else '<div class="none">Nothing is running late.</div>'}
-<div class="note">Thresholds: undispatched beyond 3 working days, in transit beyond
-5 working days, plus any courier-reported failure. Weekends excluded.<br><br>
+<div class="note">Thresholds in use: undispatched beyond
+<strong>{unfulfilled_days if unfulfilled_days is not None else 3}</strong> working days,
+in transit beyond <strong>{transit_days if transit_days is not None else 5}</strong>,
+plus any courier-reported failure. Weekends excluded.<br><br>
 Fulfilment statuses Shopify reports for this store:
 <strong>{html_escape(status_line)}</strong>. {html_escape(feed_note)}</div>
 </div>"""
