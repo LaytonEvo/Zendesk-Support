@@ -340,3 +340,28 @@ def test_evaluation_records_when_no_order_was_found(tmp_path, monkeypatch):
 
     with _corpus(tmp_path) as store:
         assert ev.evaluate_ticket(store, 1)["order_context_found"] is False
+
+
+def test_stray_line_breaks_and_junk_tails_are_repaired():
+    """Both defects came from real drafts generated against live tickets."""
+    from evogolf_support.drafting.generate import _clean_output
+
+    assert _clean_output(
+        "please let me know \ns\ns\ns"
+    ) == "please let me know"
+    assert _clean_output(
+        "showing as delivered [agent: confirm] \ninto your address."
+    ) == "showing as delivered [agent: confirm] into your address."
+
+
+def test_tidying_leaves_well_formed_drafts_untouched():
+    from evogolf_support.drafting.generate import _clean_output
+
+    for text in [
+        "Hi Craig,\n\nHope you are well and thank you for your order!\n\nSupport Team",
+        "Your order shipped.\n\nTracking: 6978946422\n\nSupport Team\nEvolution Golf",
+        "Line one\nLine two starts with a capital",
+        "See the note [agent: check] and send.\n\nSupport Team",
+        "",
+    ]:
+        assert _clean_output(text) == text, text

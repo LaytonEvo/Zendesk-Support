@@ -60,12 +60,25 @@ _ARTEFACTS = [
 ]
 
 
+# Live drafts occasionally came back with a single newline dropped into the
+# middle of a sentence ("before sending] \ninto your address") or a run of
+# one-letter lines where a sign-off belonged ("let me know \ns\ns\ns").
+# Paragraphs in these drafts are always separated by a blank line, so a lone
+# newline mid-clause is an artefact rather than layout. The junk tail is
+# removed first: otherwise joining the lines destroys the pattern that
+# identifies it.
+_JUNK_TAIL = re.compile(r"(?:[ \t]*\n[ \t]*[A-Za-z]{1,2}[ \t]*)+\s*$")
+_STRAY_BREAK = re.compile(r"([a-z,;\]])[ \t]*\n(?!\n)(?=[ \t]*[a-z])")
+
+
 def _clean_output(text: str) -> str:
-    """Repair markup artefacts that must never reach a customer reply."""
+    """Repair artefacts that must never reach a customer reply."""
     if not text:
         return text
     for pattern, replacement in _ARTEFACTS:
         text = pattern.sub(replacement, text)
+    text = _JUNK_TAIL.sub("", text)
+    text = _STRAY_BREAK.sub(r"\1 ", text)
     return text
 
 
