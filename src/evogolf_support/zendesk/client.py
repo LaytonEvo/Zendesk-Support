@@ -91,6 +91,31 @@ class ZendeskClient:
 
         raise ZendeskError(f"Gave up on {path} after {MAX_RETRIES} retries")
 
+    def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST to Zendesk, retrying on 429 and transient 5xx."""
+        for attempt in range(MAX_RETRIES):
+            response = self._client.post(path, json=payload)
+
+            if response.status_code == 429:
+                wait = _retry_after(response, DEFAULT_BACKOFF_SECONDS)
+                log.warning("Rate limited on POST %s; sleeping %.0fs", path, wait)
+                time.sleep(wait)
+                continue
+            if response.status_code >= 500:
+                time.sleep(2.0 ** attempt)
+                continue
+            if response.status_code >= 400:
+                raise ZendeskError(
+                    f"Zendesk {response.status_code} on POST {path}: "
+                    f"{response.text[:400]}"
+                )
+            return response.json()
+
+        raise ZendeskError(f"Gave up on POST {path} after {MAX_RETRIES} retries")
+
+    def create_ticket(self, ticket: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/tickets.json", {"ticket": ticket}).get("ticket", {})
+
     def verify(self) -> dict[str, Any]:
         """Confirm credentials work and report who we are authenticated as."""
         return self.get("/users/me.json").get("user", {})

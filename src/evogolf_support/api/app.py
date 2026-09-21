@@ -38,6 +38,7 @@ from ..drafting.generate import Draft, draft_reply
 from ..drafting.retrieve import rebuild_index
 from ..drafting import shopify, shopify_oauth
 from ..drafting.evaluate import run_evaluation
+from ..proactive.run import run_sweep
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -445,6 +446,16 @@ def draft(req: DraftRequest) -> Draft:
             theme=req.theme,
             order_context=order_context,
         )
+
+
+@app.post("/proactive/sweep", dependencies=[Depends(require_admin)])
+def proactive_sweep(dry_run: bool = False) -> dict[str, int]:
+    """Look for delayed orders and raise a ticket with a drafted message.
+
+    Nothing reaches a customer: the draft goes on as an internal note.
+    Intended to run once a day from a scheduler.
+    """
+    return run_sweep(dry_run=dry_run)
 
 
 @app.post("/reindex", dependencies=[Depends(require_admin)])
