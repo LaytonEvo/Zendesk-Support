@@ -89,3 +89,26 @@ def test_reclassify_skips_tickets_with_no_customer_message(tmp_path):
             {"id": 11, "author_id": 5, "public": True, "body": "b", "clean_body": "Agent only"},
         ])
         assert _ambiguous_rows(store) == []
+
+
+def test_reclassify_binds_parameters_in_sql_text_order(tmp_path):
+    """Regression: agent-id placeholders precede theme placeholders in the SQL.
+
+    Binding them in the wrong order matches nothing and turns re-classification
+    into a silent no-op, which looks identical to "there was nothing to do".
+    """
+    with _corpus(tmp_path) as store:
+        # Several agents, so a mis-ordered bind cannot coincidentally line up.
+        store.upsert_users([
+            {"id": 5, "name": "Brad", "role": "agent"},
+            {"id": 6, "name": "Jack", "role": "agent"},
+            {"id": 7, "name": "Alex", "role": "admin"},
+        ])
+        _add(store, 1, "order_status_delivery", 1)
+        _add(store, 2, "returns_exchanges_refunds", 1)
+        _add(store, 3, "order_amendment_cancellation", 1)
+        rows = _ambiguous_rows(store)
+
+    assert sorted(r.ticket_id for r in rows) == [1, 2, 3]
+    for row in rows:
+        assert "Where is my order?" in row.text

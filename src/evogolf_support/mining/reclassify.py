@@ -52,11 +52,16 @@ def _ambiguous_rows(store: CorpusStore) -> list[_Row]:
     placeholders = ",".join("?" * len(AMBIGUOUS_THEMES))
     agent_ids = store.agent_ids()
     agent_clause = ""
-    params: list[object] = list(AMBIGUOUS_THEMES)
+    # SQLite binds "?" by position in the SQL text. The agent placeholders sit
+    # in the SELECT subquery, which comes BEFORE the theme placeholders in the
+    # WHERE - so they must be bound first. Getting this backwards swaps author
+    # ids with theme names and silently matches nothing.
+    params: list[object] = []
     if agent_ids:
         agent_ph = ",".join("?" * len(agent_ids))
         agent_clause = f"AND c.author_id NOT IN ({agent_ph})"
         params.extend(sorted(agent_ids))
+    params.extend(AMBIGUOUS_THEMES)
 
     # The earliest non-agent comment is the customer's opening message.
     sql = f"""
