@@ -26,6 +26,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from ..config import ConfigError, corpus_path, redact_pii
 from ..corpus.quality import report as quality_report
 from ..corpus.reclean import needs_reclean, reclean
+from ..corpus.themes import report as theme_report
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -139,6 +140,8 @@ def log_quality_report() -> None:
         with CorpusStore(path) as store:
             for section, values in quality_report(store).items():
                 log.info("quality/%s: %s", section, values)
+            for section, values in theme_report(store).items():
+                log.info("themes/%s: %s", section, values)
     except Exception as exc:
         log.warning("Could not build the quality report: %s", exc)
 
@@ -228,6 +231,16 @@ def quality() -> dict[str, Any]:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
     with CorpusStore(path) as store:
         return quality_report(store)
+
+
+@app.get("/themes", dependencies=[Depends(require_admin)])
+def themes() -> dict[str, Any]:
+    """What the tickets are about, by volume. Aggregate counts only."""
+    path = corpus_path()
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
+    with CorpusStore(path) as store:
+        return theme_report(store)
 
 
 @app.post("/export", status_code=status.HTTP_202_ACCEPTED,

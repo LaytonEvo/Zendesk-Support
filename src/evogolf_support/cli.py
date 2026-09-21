@@ -72,6 +72,20 @@ def cmd_quality(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_themes(_: argparse.Namespace) -> int:
+    import json
+
+    from .corpus.themes import report
+
+    path = corpus_path()
+    if not path.exists():
+        print(f"No corpus yet at {path}. Run: evogolf export")
+        return 1
+    with CorpusStore(path) as store:
+        print(json.dumps(report(store), indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evogolf", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -90,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser(
         "quality", help="coverage and cleaning measurements (no message content)"
     ).set_defaults(func=cmd_quality)
+    sub.add_parser(
+        "themes", help="what the tickets are about, by volume"
+    ).set_defaults(func=cmd_themes)
 
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
