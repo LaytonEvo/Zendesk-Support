@@ -68,6 +68,13 @@ _ARTEFACTS = [
 # removed first: otherwise joining the lines destroys the pattern that
 # identifies it.
 _JUNK_TAIL = re.compile(r"(?:[ \t]*\n[ \t]*[A-Za-z]{1,2}[ \t]*)+\s*$")
+# The same stray fragments also turn up mid-draft, just before a sign-off, so
+# an isolated one- or two-letter line is removed wherever it appears. Real
+# prose in these replies never produces one.
+_JUNK_LINE = re.compile(r"\n[ \t]*[A-Za-z]{1,2}[ \t]*(?=\n)")
+# A truncated escape sequence, e.g. "\ff1f" left over from a fullwidth
+# character the model started to emit.
+_BROKEN_ESCAPE = re.compile(r"\\+[0-9a-fA-F]{2,6}\b")
 _STRAY_BREAK = re.compile(r"([a-z,;\]])[ \t]*\n(?!\n)(?=[ \t]*[a-z])")
 
 
@@ -77,7 +84,9 @@ def _clean_output(text: str) -> str:
         return text
     for pattern, replacement in _ARTEFACTS:
         text = pattern.sub(replacement, text)
+    text = _BROKEN_ESCAPE.sub("", text)
     text = _JUNK_TAIL.sub("", text)
+    text = _JUNK_LINE.sub("", text)
     text = _STRAY_BREAK.sub(r"\1 ", text)
     return text
 

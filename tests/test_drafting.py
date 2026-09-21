@@ -365,3 +365,27 @@ def test_tidying_leaves_well_formed_drafts_untouched():
         "",
     ]:
         assert _clean_output(text) == text, text
+
+
+def test_stray_fragments_are_removed_wherever_they_appear():
+    """All three forms seen across live runs, including mid-draft."""
+    from evogolf_support.drafting.generate import _clean_output
+
+    assert _clean_output("please let me know \\ff1f\n\nSupport Team") == \
+        "please let me know \n\nSupport Team"
+    assert _clean_output("please let me know! \ns\n\nSupport Team") == \
+        "please let me know! \n\nSupport Team"
+    assert _clean_output("please let me know \ns\ns\ns") == "please let me know"
+
+
+def test_numbered_steps_and_figures_survive_tidying():
+    """The sanitiser must not eat legitimate content."""
+    from evogolf_support.drafting.generate import _clean_output
+
+    for text in [
+        "1. Check the warehouse\n\n2. Raise with Royal Mail\n\nSupport Team",
+        "Tracking number 6978946422.\n\nSupport Team",
+        "Your total was \u00a3429.00.\n\nSupport Team",
+        "Hi Craig,\n\nThank you for your order!\n\nSupport Team\nEvolution Golf",
+    ]:
+        assert _clean_output(text) == text, text
