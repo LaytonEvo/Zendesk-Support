@@ -34,6 +34,7 @@ from ..mining.discover import Taxonomy, classify_tickets, discover_themes
 from ..mining.run import GUIDE_KEY, run_mining
 from ..drafting.generate import Draft, draft_reply
 from ..drafting.retrieve import rebuild_index
+from ..drafting import shopify
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -364,6 +365,8 @@ class DraftRequest(BaseModel):
     body: str
     theme: str | None = None
     order_context: str | None = None
+    requester_email: str | None = None
+    lookup_order: bool = True
 
 
 @app.post("/draft", dependencies=[Depends(require_admin)])
@@ -374,13 +377,21 @@ def draft(req: DraftRequest) -> Draft:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
     if not req.body.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "body is required.")
+    order_context = req.order_context
+    if order_context is None and req.lookup_order:
+        # Best effort: a lookup failure must not stop the draft, it just
+        # means the agent fills the figures in instead.
+        order_context = shopify.context_for_ticket(
+            f"{req.subject} {req.body}", email=req.requester_email
+        ) or None
+
     with CorpusStore(path) as store:
         return draft_reply(
             store,
             subject=req.subject,
             body=req.body,
             theme=req.theme,
-            order_context=req.order_context,
+            order_context=order_context,
         )
 
 
