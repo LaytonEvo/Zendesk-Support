@@ -88,3 +88,27 @@ def test_full_pipeline_on_a_realistic_agent_reply():
 def test_empty_body_is_safe():
     assert clean_body("") == ""
     assert clean_body("   \n\n  ") == ""
+
+
+def test_inline_signoff_with_a_name_is_stripped():
+    """The common form: sign-off and name on one line."""
+    for raw in (
+        "The refund is processed.\n\nKind regards, Brad\n",
+        "The refund is processed.\n\nMany thanks Brad\n",
+        "The refund is processed.\n\nKind regards, Brad Smith\n",
+        "The refund is processed.\n\nCheers,\nBrad\n",
+    ):
+        out = strip_signature(raw)
+        assert "refund is processed" in out
+        assert "Brad" not in out, raw
+
+
+def test_prose_containing_signoff_words_is_kept():
+    """A case-insensitive name match would truncate these real replies."""
+    keep = [
+        "Thanks for your help with this, I will chase the courier today.",
+        "With regards to your order, the trolley is on its way to you now.",
+        "Many thanks to the team who sorted the exchange out so quickly here.",
+    ]
+    for raw in keep:
+        assert strip_signature(raw).strip() == raw.strip()

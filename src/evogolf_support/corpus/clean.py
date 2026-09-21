@@ -34,13 +34,22 @@ _FOOTER_MARKERS = [
 
 # --- Sign-offs -------------------------------------------------------------
 # The closing line plus whatever follows it (name, job title, phone block).
+# "Kind regards" on its own line, or "Kind regards, Brad" / "Many thanks Brad"
+# all on one line - the inline form is the common one and was being missed.
+#
+# The sign-off words are case-insensitive via a scoped (?i:...) group, but the
+# trailing name stays case-SENSITIVE on purpose. Making the whole pattern
+# case-insensitive would let "Thanks for your help" parse as the sign-off
+# "thanks" followed by the name "for your", truncating a real reply.
 _SIGNOFF = re.compile(
-    r"^\s*("
-    r"kind regards|kindest regards|many thanks|best regards|warm regards|"
+    r"^[ \t]*"
+    r"(?i:kind regards|kindest regards|many thanks|best regards|warm regards|"
     r"all the best|best wishes|thanks again|thank you again|regards|cheers|"
-    r"yours sincerely|yours faithfully|speak soon|thanks"
-    r")\s*[,.!]?\s*$",
-    re.MULTILINE | re.IGNORECASE,
+    r"yours sincerely|yours faithfully|speak soon|thanks)"
+    r"[ \t]*[,.!]?[ \t]*"
+    r"(?:[A-Z][\w'\u2019-]*(?:[ \t]+[A-Z][\w'\u2019-]*){0,2})?"
+    r"[ \t]*$",
+    re.MULTILINE,
 )
 _SIG_DELIMITER = re.compile(r"^--\s*$", re.MULTILINE)
 
@@ -56,6 +65,12 @@ _UK_POSTCODE = re.compile(
 _CARD = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
 
 _BLANK_RUN = re.compile(r"\n{3,}")
+
+# Bumped whenever the cleaning rules change. The service compares this against
+# the value stored in the corpus on boot and re-cleans from the stored raw
+# bodies when they differ, so a rule fix reaches existing rows without
+# re-exporting anything from Zendesk.
+CLEANER_VERSION = 2
 
 
 def strip_quoted(text: str) -> str:

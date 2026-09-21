@@ -23,8 +23,9 @@ from typing import Any, AsyncIterator
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from ..config import ConfigError, corpus_path
+from ..config import ConfigError, corpus_path, redact_pii
 from ..corpus.quality import report as quality_report
+from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 
@@ -110,6 +111,25 @@ def _run_export(**kwargs: Any) -> None:
         _export_lock.release()
 
 
+def reclean_if_rules_changed() -> None:
+    """Apply newer cleaning rules to comments already exported.
+
+    Cheap and local - it rebuilds clean_body from the raw bodies already in
+    the corpus, so a cleaning fix does not mean re-exporting from Zendesk.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            if not needs_reclean(store):
+                return
+            log.info("Cleaning rules have changed - re-cleaning the corpus")
+            reclean(store, redact_pii=redact_pii())
+    except Exception as exc:
+        log.warning("Could not re-clean the corpus: %s", exc)
+
+
 def log_quality_report() -> None:
     """Log corpus coverage and cleaning stats - counts only, no content."""
     try:
@@ -165,6 +185,7 @@ def kick_off_first_export() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    reclean_if_rules_changed()
     log_quality_report()
     kick_off_first_export()
     yield

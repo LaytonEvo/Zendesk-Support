@@ -93,10 +93,11 @@ def run_export(
                     comments = []
 
                 for comment in comments:
-                    comment["clean_body"] = clean_body(
-                        comment.get("plain_body") or comment.get("body") or "",
-                        redact_pii=redact,
-                    )
+                    # Store the same text the cleaner reads, so a later
+                    # re-clean reproduces exactly this result.
+                    raw = comment.get("plain_body") or comment.get("body") or ""
+                    comment["body"] = raw
+                    comment["clean_body"] = clean_body(raw, redact_pii=redact)
                     if comment.get("author_id"):
                         seen_user_ids.add(int(comment["author_id"]))
 

@@ -191,6 +191,20 @@ class CorpusStore:
         ).fetchall()
         return {r["id"] for r in rows}
 
+    def comment_bodies(self) -> list[tuple[int, str]]:
+        """(comment id, raw body) for every stored comment."""
+        return [
+            (r["id"], r["body"] or "")
+            for r in self._conn.execute("SELECT id, body FROM comments")
+        ]
+
+    def update_clean_bodies(self, pairs: list[tuple[int, str]]) -> None:
+        with self._tx() as conn:
+            conn.executemany(
+                "UPDATE comments SET clean_body = ? WHERE id = ?",
+                [(clean, comment_id) for comment_id, clean in pairs],
+            )
+
     def stats(self) -> dict[str, int]:
         def count(sql: str) -> int:
             return int(self._conn.execute(sql).fetchone()[0])
