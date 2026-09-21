@@ -94,3 +94,130 @@ def test_graphql_errors_raise_rather_than_returning_bad_data(monkeypatch):
 
 def test_empty_orders_render_as_empty_string():
     assert shopify.format_for_prompt([]) == ""
+
+
+# --- client credentials grant ---------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _clear_token_cache():
+    shopify._token_cache.update(value=None, expires_at=0.0, scopes="")
+    yield
+    shopify._token_cache.update(value=None, expires_at=0.0, scopes="")
+
+
+def _creds(monkeypatch):
+    monkeypatch.setenv("SHOPIFY_STORE_DOMAIN", "evolutiongolf.myshopify.com")
+    monkeypatch.delenv("SHOPIFY_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("SHOPIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("SHOPIFY_CLIENT_SECRET", "secret")
+
+
+def test_configured_accepts_client_credentials(monkeypatch):
+    _creds(monkeypatch)
+    assert shopify.configured() is True
+
+
+def test_configured_still_accepts_a_legacy_token(monkeypatch):
+    monkeypatch.setenv("SHOPIFY_STORE_DOMAIN", "x.myshopify.com")
+    monkeypatch.setenv("SHOPIFY_ACCESS_TOKEN", "shpat_old")
+    monkeypatch.delenv("SHOPIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SHOPIFY_CLIENT_SECRET", raising=False)
+    assert shopify.configured() is True
+    assert shopify.access_token() == "shpat_old"
+
+
+def test_credentials_are_exchanged_for_a_token(monkeypatch):
+    _creds(monkeypatch)
+    sent = {}
+
+    def fake_post(url, **kw):
+        sent["url"] = url
+        sent["data"] = kw.get("data")
+        return httpx.Response(200, json={"access_token": "tok-1", "expires_in": 86399,
+                                         "scope": "read_orders,read_all_orders"},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert shopify.access_token() == "tok-1"
+    assert sent["url"].endswith("/admin/oauth/access_token")
+    assert sent["data"]["grant_type"] == "client_credentials"
+    assert sent["data"]["client_id"] == "cid"
+    assert sent["data"]["client_secret"] == "secret"
+
+
+def test_token_is_cached_and_not_refetched_every_call(monkeypatch):
+    _creds(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_post(url, **kw):
+        calls["n"] += 1
+        return httpx.Response(200, json={"access_token": f"tok-{calls['n']}",
+                                         "expires_in": 86399, "scope": "read_orders"},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert shopify.access_token() == "tok-1"
+    assert shopify.access_token() == "tok-1"
+    assert calls["n"] == 1
+
+
+def test_expired_token_is_refreshed(monkeypatch):
+    """These tokens last 24 hours, unlike the permanent shpat_ ones."""
+    _creds(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_post(url, **kw):
+        calls["n"] += 1
+        return httpx.Response(200, json={"access_token": f"tok-{calls['n']}",
+                                         "expires_in": 86399, "scope": "read_orders"},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert shopify.access_token() == "tok-1"
+    shopify._token_cache["expires_at"] = 0.0      # simulate expiry
+    assert shopify.access_token() == "tok-2"
+    assert calls["n"] == 2
+
+
+def test_shop_not_permitted_gives_an_actionable_error(monkeypatch):
+    """The most likely setup failure: app and store in different orgs."""
+    _creds(monkeypatch)
+
+    def fake_post(url, **kw):
+        return httpx.Response(
+            401, text='{"error":"Oauth error shop_not_permitted: Client credentials '
+                      'cannot be performed on this shop."}',
+            request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with pytest.raises(RuntimeError, match="same Shopify organization"):
+        shopify.access_token()
+
+
+def test_missing_read_all_orders_is_warned_about(monkeypatch, caplog):
+    """Without it, orders older than 60 days return nothing and no error."""
+    import logging
+
+    _creds(monkeypatch)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(
+        200, json={"access_token": "t", "expires_in": 86399, "scope": "read_orders"},
+        request=httpx.Request("POST", url)))
+
+    with caplog.at_level(logging.WARNING):
+        shopify.access_token()
+    assert any("read_all_orders" in r.message for r in caplog.records)
+
+
+def test_no_warning_when_read_all_orders_is_granted(monkeypatch, caplog):
+    import logging
+
+    _creds(monkeypatch)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(
+        200, json={"access_token": "t", "expires_in": 86399,
+                   "scope": "read_orders,read_all_orders,read_customers"},
+        request=httpx.Request("POST", url)))
+
+    with caplog.at_level(logging.WARNING):
+        shopify.access_token()
+    assert not any("read_all_orders is NOT granted" in r.message for r in caplog.records)
+    assert "read_all_orders" in shopify.granted_scopes()

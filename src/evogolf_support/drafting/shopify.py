@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -62,12 +64,99 @@ _ORDER_CUE = re.compile(
 _HASH_NUMBER = re.compile(r"#\s?(\d{4,8})")
 
 
-def configured() -> bool:
+# --- Authentication --------------------------------------------------------
+# Apps created in the Shopify admin, with a permanent shpat_ token, can no
+# longer be created. A server-side integration acting on its own org's stores
+# now uses the client credentials grant: the app exchanges its client id and
+# secret for a token, and that token expires after 24 hours (expires_in is
+# 86399), so it has to be refreshed rather than stored once.
+TOKEN_PATH = "/admin/oauth/access_token"
+# Refresh a little early so a request never races the expiry.
+TOKEN_SAFETY_MARGIN = 300.0
+
+_token_lock = threading.Lock()
+_token_cache: dict[str, Any] = {"value": None, "expires_at": 0.0, "scopes": ""}
+
+
+def _store_domain() -> str:
     load_dotenv()
+    raw = os.environ.get("SHOPIFY_STORE_DOMAIN", "").strip()
+    return raw.replace("https://", "").replace("http://", "").strip("/")
+
+
+def configured() -> bool:
+    """True when we can obtain a token, either grant or legacy."""
+    load_dotenv()
+    if not _store_domain():
+        return False
+    if os.environ.get("SHOPIFY_ACCESS_TOKEN", "").strip():
+        return True
     return bool(
-        os.environ.get("SHOPIFY_STORE_DOMAIN", "").strip()
-        and os.environ.get("SHOPIFY_ACCESS_TOKEN", "").strip()
+        os.environ.get("SHOPIFY_CLIENT_ID", "").strip()
+        and os.environ.get("SHOPIFY_CLIENT_SECRET", "").strip()
     )
+
+
+def _fetch_token() -> tuple[str, float, str]:
+    """Exchange the client credentials for a 24-hour access token."""
+    domain = _store_domain()
+    response = httpx.post(
+        f"https://{domain}{TOKEN_PATH}",
+        data={
+            "client_id": os.environ["SHOPIFY_CLIENT_ID"].strip(),
+            "client_secret": os.environ["SHOPIFY_CLIENT_SECRET"].strip(),
+            "grant_type": "client_credentials",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=20.0,
+    )
+    if response.status_code >= 400:
+        body = response.text[:300]
+        if "shop_not_permitted" in body:
+            raise RuntimeError(
+                "Shopify rejected the client credentials grant with "
+                "shop_not_permitted. The app and the store must be in the same "
+                "Shopify organization in the Dev Dashboard, and "
+                "SHOPIFY_STORE_DOMAIN must match the store's myshopify.com "
+                f"subdomain exactly. Response: {body}"
+            )
+        raise RuntimeError(f"Shopify token request failed ({response.status_code}): {body}")
+
+    payload = response.json()
+    token = payload.get("access_token")
+    if not token:
+        raise RuntimeError(f"Shopify token response had no access_token: {payload}")
+    expires_in = float(payload.get("expires_in", 86399))
+    scopes = payload.get("scope", "") or ""
+    return token, time.time() + expires_in - TOKEN_SAFETY_MARGIN, scopes
+
+
+def access_token() -> str:
+    """A usable Admin API token, refreshed when the cached one is near expiry."""
+    load_dotenv()
+    legacy = os.environ.get("SHOPIFY_ACCESS_TOKEN", "").strip()
+    if legacy:
+        return legacy  # an older admin-created app, still valid if you have one
+
+    with _token_lock:
+        if _token_cache["value"] and time.time() < _token_cache["expires_at"]:
+            return _token_cache["value"]
+        token, expires_at, scopes = _fetch_token()
+        _token_cache.update(value=token, expires_at=expires_at, scopes=scopes)
+        log.info("Obtained a Shopify token; granted scopes: %s", scopes or "(none reported)")
+        # The token response is the only readback of what we can actually see.
+        if "read_all_orders" not in scopes:
+            log.warning(
+                "read_all_orders is NOT granted: order lookups will silently "
+                "return nothing for orders older than 60 days. Add the scope to "
+                "the app version in the Dev Dashboard and approve it on the store."
+            )
+        return token
+
+
+def granted_scopes() -> str:
+    """Scopes on the current token, for diagnostics. Empty if none fetched."""
+    return _token_cache.get("scopes", "")
 
 
 def order_references(text: str) -> list[str]:
@@ -85,8 +174,8 @@ def order_references(text: str) -> list[str]:
 
 def _post(query: str, variables: dict[str, Any]) -> dict[str, Any]:
     load_dotenv()
-    domain = os.environ["SHOPIFY_STORE_DOMAIN"].strip().replace("https://", "").strip("/")
-    token = os.environ["SHOPIFY_ACCESS_TOKEN"].strip()
+    domain = _store_domain()
+    token = access_token()
     version = os.environ.get("SHOPIFY_API_VERSION", API_VERSION).strip()
 
     response = httpx.post(
