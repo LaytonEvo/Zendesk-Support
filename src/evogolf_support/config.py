@@ -25,11 +25,16 @@ def load_dotenv(path: Path | None = None) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+class ConfigError(RuntimeError):
+    """A required setting is missing."""
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(
-            f"{name} is not set. Copy .env.example to .env and fill it in."
+        raise ConfigError(
+            f"{name} is not set. On Railway, add it in the service's Variables "
+            f"tab; locally, copy .env.example to .env and fill it in."
         )
     return value
 

@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from ..config import corpus_path
+from ..config import ConfigError, corpus_path
 from ..corpus.store import CorpusStore
 
 log = logging.getLogger(__name__)
@@ -75,6 +75,11 @@ def _run_export(**kwargs: Any) -> None:
             "errors": len(result.errors),
         }
         log.info("Export finished: %s", _export_state["last_result"])
+    except ConfigError as exc:
+        # Expected before the Zendesk credentials are set - a stack trace here
+        # would bury the one line that says what to do about it.
+        _export_state["last_error"] = str(exc)
+        log.error("Export not started: %s", exc)
     except Exception as exc:
         _export_state["last_error"] = str(exc)
         log.exception("Export failed: %s", exc)

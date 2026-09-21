@@ -96,3 +96,22 @@ def test_boot_export_runs_when_corpus_is_empty(tmp_path, monkeypatch):
         import time
         time.sleep(0.01)
     assert started == [{"full": True}]
+
+
+def test_missing_credentials_are_reported_without_a_traceback(monkeypatch, caplog):
+    """Before the token is set, the log should say what to do, not dump a stack."""
+    import logging
+
+    from evogolf_support.config import ConfigError
+
+    def boom(**_kwargs):
+        raise ConfigError("ZENDESK_EMAIL is not set. On Railway, add it in ...")
+
+    monkeypatch.setattr("evogolf_support.zendesk.export.run_export", boom)
+    with caplog.at_level(logging.ERROR):
+        app_module._run_export(full=True)
+
+    assert app_module._export_state["last_error"].startswith("ZENDESK_EMAIL is not set")
+    assert app_module._export_state["running"] is False
+    # A ConfigError must not be logged with exception info.
+    assert all(record.exc_info is None for record in caplog.records)
