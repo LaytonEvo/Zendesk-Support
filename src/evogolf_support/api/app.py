@@ -25,8 +25,23 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import ConfigError, corpus_path
 from ..corpus.store import CorpusStore
+from ..zendesk.export import CURSOR_KEY
 
 log = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    """Send our INFO logs to stdout so Railway shows them.
+
+    Without a root handler, Python's last-resort handler emits WARNING and
+    above only - which silently swallowed every progress line the export
+    writes, leaving a 20-minute job looking like it had never started.
+    """
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        force=True,
+    )
 
 # Guards against a second export starting while one is already running.
 _export_lock = threading.Lock()
@@ -88,37 +103,48 @@ def _run_export(**kwargs: Any) -> None:
         _export_lock.release()
 
 
-def _corpus_is_empty() -> bool:
+def _saved_cursor() -> str | None:
+    """The export cursor from a previous run, if there is one."""
     path = corpus_path()
     if not path.exists():
-        return True
+        return None
     with CorpusStore(path) as store:
-        return store.stats()["tickets"] == 0
+        return store.get_state(CURSOR_KEY)
 
 
 def kick_off_first_export() -> None:
-    """Export the full history the first time the service boots.
+    """Bring the corpus up to date on every boot.
 
-    Deliberately conditional on an empty corpus: a redeploy should not re-walk
-    1,300 tickets, and the volume keeps the corpus across deploys.
+    Keyed on the saved cursor rather than on whether the corpus has rows.
+    A first boot has no cursor and walks the full history; a boot after an
+    interrupted export resumes from the cursor and finishes the job; a boot
+    after a completed export costs one API call and fetches only what changed.
+
+    Keying this on "is the corpus empty" instead would strand a part-finished
+    export: the rows written so far would suppress the very run needed to
+    complete it.
     """
     if os.environ.get("AUTO_EXPORT", "true").strip().lower() not in {"1", "true", "yes"}:
         log.info("AUTO_EXPORT disabled; not exporting on boot")
         return
     try:
-        if not _corpus_is_empty():
-            log.info("Corpus already populated; skipping the boot export")
-            return
+        cursor = _saved_cursor()
     except Exception as exc:
-        log.warning("Could not inspect corpus (%s); skipping boot export", exc)
+        log.warning("Could not read the export cursor (%s); skipping boot export", exc)
         return
 
-    log.info("Corpus is empty - starting full Zendesk export in the background")
-    threading.Thread(target=_run_export, kwargs={"full": True}, daemon=True).start()
+    if cursor:
+        log.info("Resuming Zendesk export from the saved cursor")
+    else:
+        log.info("No saved cursor - starting a full Zendesk export in the background")
+    threading.Thread(
+        target=_run_export, kwargs={"full": cursor is None}, daemon=True
+    ).start()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    configure_logging()
     kick_off_first_export()
     yield
 

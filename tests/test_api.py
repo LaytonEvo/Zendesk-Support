@@ -68,34 +68,65 @@ def test_export_triggers_a_background_run(client, monkeypatch):
     assert started == [{"full": True}]
 
 
-def test_boot_export_is_skipped_when_corpus_has_tickets(tmp_path, monkeypatch):
-    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "corpus.sqlite3"))
-    monkeypatch.setenv("AUTO_EXPORT", "true")
-    from evogolf_support.config import corpus_path
-    from evogolf_support.corpus.store import CorpusStore
+def _wait_for(collection, tries=100):
+    import time
 
-    with CorpusStore(corpus_path()) as store:
-        store.upsert_ticket({"id": 1, "subject": "x", "status": "solved"})
-
-    calls: list[dict] = []
-    monkeypatch.setattr(app_module, "_run_export", lambda **kw: calls.append(kw))
-    app_module.kick_off_first_export()
-    assert calls == []
+    for _ in range(tries):
+        if collection:
+            return
+        time.sleep(0.01)
 
 
-def test_boot_export_runs_when_corpus_is_empty(tmp_path, monkeypatch):
+def test_boot_export_walks_everything_when_there_is_no_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("CORPUS_DB", str(tmp_path / "fresh.sqlite3"))
     monkeypatch.setenv("AUTO_EXPORT", "true")
     started: list[dict] = []
     monkeypatch.setattr(app_module, "_run_export", lambda **kw: started.append(kw))
 
     app_module.kick_off_first_export()
-    for _ in range(50):
-        if started:
-            break
-        import time
-        time.sleep(0.01)
+    _wait_for(started)
     assert started == [{"full": True}]
+
+
+def test_interrupted_export_resumes_on_the_next_boot(tmp_path, monkeypatch):
+    """A part-finished export must not be stranded by its own partial rows."""
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "partial.sqlite3"))
+    monkeypatch.setenv("AUTO_EXPORT", "true")
+    from evogolf_support.config import corpus_path
+    from evogolf_support.corpus.store import CorpusStore
+    from evogolf_support.zendesk.export import CURSOR_KEY
+
+    # Simulate a run that wrote some tickets and saved a cursor, then died.
+    with CorpusStore(corpus_path()) as store:
+        store.upsert_ticket({"id": 1, "subject": "x", "status": "solved"})
+        store.set_state(CURSOR_KEY, "cursor-halfway")
+
+    started: list[dict] = []
+    monkeypatch.setattr(app_module, "_run_export", lambda **kw: started.append(kw))
+    app_module.kick_off_first_export()
+    _wait_for(started)
+
+    # Resumes (full=False) rather than skipping or re-walking from scratch.
+    assert started == [{"full": False}]
+
+
+def test_auto_export_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "fresh.sqlite3"))
+    monkeypatch.setenv("AUTO_EXPORT", "false")
+    started: list[dict] = []
+    monkeypatch.setattr(app_module, "_run_export", lambda **kw: started.append(kw))
+
+    app_module.kick_off_first_export()
+    assert started == []
+
+
+def test_configure_logging_lets_info_through(caplog):
+    """Regression: unconfigured logging silently swallowed all export progress."""
+    import logging
+
+    app_module.configure_logging()
+    assert logging.getLogger().level <= logging.INFO
+    assert logging.getLogger().handlers
 
 
 def test_missing_credentials_are_reported_without_a_traceback(monkeypatch, caplog):
