@@ -16,6 +16,7 @@ import logging
 
 from ..corpus.store import CorpusStore
 from ..mining.run import NON_SUPPORT_THEMES
+from . import shopify
 from .generate import draft_reply
 
 log = logging.getLogger(__name__)
@@ -82,11 +83,19 @@ def evaluate_ticket(store: CorpusStore, ticket_id: int) -> dict:
         "SELECT theme_key FROM ticket_themes WHERE ticket_id = ?", (ticket_id,)
     ).fetchone()
 
+    # The evaluation must exercise the same path an agent gets, order lookup
+    # included - otherwise it measures a system nobody will actually use.
+    subject = ticket["subject"] or ""
+    order_context = shopify.context_for_ticket(
+        f"{subject} {opening['clean_body']}"
+    ) or None
+
     draft = draft_reply(
         store,
-        subject=ticket["subject"] or "",
+        subject=subject,
         body=opening["clean_body"],
         theme=theme_row["theme_key"] if theme_row else None,
+        order_context=order_context,
         exclude_ticket_id=ticket_id,   # never retrieve the answer we are predicting
     )
     return {
@@ -95,6 +104,7 @@ def evaluate_ticket(store: CorpusStore, ticket_id: int) -> dict:
         "theme": theme_row["theme_key"] if theme_row else None,
         "customer_asked": opening["clean_body"],
         "team_actually_replied": actual["clean_body"],
+        "order_context_found": bool(order_context),
         "draft": draft.model_dump(),
     }
 

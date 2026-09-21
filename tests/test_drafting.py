@@ -304,3 +304,39 @@ def test_prompt_forbids_assuming_fault_and_markup():
     assert "never state or imply that we were at fault" in lowered
     assert "latex" in lowered
     assert "standard service" in lowered
+
+
+def test_evaluation_exercises_the_order_lookup(tmp_path, monkeypatch):
+    """The evaluation must test the same path an agent gets, orders included."""
+    from evogolf_support.drafting import evaluate as ev
+    from evogolf_support.drafting.generate import Draft
+
+    monkeypatch.setattr(ev.shopify, "context_for_ticket",
+                        lambda text, **kw: "Order #29366 FULFILLED, DPD 123")
+    seen = {}
+
+    def fake_draft(store, **kw):
+        seen.update(kw)
+        return Draft(hand_to_agent=False, handover_reason="", draft="d",
+                     confidence="high", rules_applied=[], tickets_referenced=[],
+                     agent_notes=[])
+
+    monkeypatch.setattr(ev, "draft_reply", fake_draft)
+    with _corpus(tmp_path) as store:
+        result = ev.evaluate_ticket(store, 1)
+
+    assert seen["order_context"] == "Order #29366 FULFILLED, DPD 123"
+    assert result["order_context_found"] is True
+
+
+def test_evaluation_records_when_no_order_was_found(tmp_path, monkeypatch):
+    from evogolf_support.drafting import evaluate as ev
+    from evogolf_support.drafting.generate import Draft
+
+    monkeypatch.setattr(ev.shopify, "context_for_ticket", lambda text, **kw: "")
+    monkeypatch.setattr(ev, "draft_reply", lambda store, **kw: Draft(
+        hand_to_agent=False, handover_reason="", draft="d", confidence="high",
+        rules_applied=[], tickets_referenced=[], agent_notes=[]))
+
+    with _corpus(tmp_path) as store:
+        assert ev.evaluate_ticket(store, 1)["order_context_found"] is False
