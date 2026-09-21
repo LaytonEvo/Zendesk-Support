@@ -23,7 +23,7 @@ Four phases, each usable on its own:
 
 | Phase | What it does | Status |
 |-------|--------------|--------|
-| **1. Export** | Pull every ticket + comment from Zendesk into a local SQLite corpus, stripped of quoted history and redacted of PII | ✅ built |
+| **1. Export** | Pull every ticket + comment from Zendesk into a SQLite corpus, stripped of quoted history and redacted of PII. Deployed on Railway. | ✅ built |
 | **2. Mine** | Analyse the corpus into a written voice-and-policy guide and a categorised bank of the team's best replies | ⬜ next |
 | **3. Draft** | Retrieve similar past tickets + live Shopify order, generate a reply with Claude | ⬜ |
 | **4. Deliver** | Zendesk sidebar app (ZAF) for `help@`, Gmail drafts for `online@` | ⬜ |
@@ -40,22 +40,61 @@ policy changes, and lets you see exactly which past tickets informed a draft.
 
 ## Phase 1 — Export (built)
 
-### Setup
+### Where the Zendesk token goes
+
+**Never in GitHub.** A committed secret stays in git history even after the
+file is deleted, so the only fix is revoking it. The token belongs in one of
+two places, both of which keep it out of the repo:
+
+- **Railway variables** (how this is deployed) — Railway stores them
+  encrypted and injects them at runtime. Set them in the service's
+  **Variables** tab.
+- **A local `.env`** if you ever run it on your own machine. `.env` is
+  gitignored.
+
+Get the token from **Admin Center → Apps and integrations → Zendesk API →
+Settings → Add API token**.
+
+### Running on Railway
+
+The service is a normal Railway deployment built from the `Dockerfile`:
+
+| Variable | Value |
+|---|---|
+| `ZENDESK_SUBDOMAIN` | `evolutiongolf` |
+| `ZENDESK_EMAIL` | the agent email the token belongs to |
+| `ZENDESK_API_TOKEN` | the token — paste in Railway's Variables tab |
+| `CORPUS_DB` | `/data/corpus.sqlite3` (set by the Dockerfile) |
+| `ADMIN_TOKEN` | optional; needed only to call `/stats` and `/export` |
+| `AUTO_EXPORT` | `true` (default) — full export on first boot |
+
+A **volume mounted at `/data`** is required. Without it the corpus is wiped on
+every deploy and the service re-exports the whole history each time.
+
+On first boot the service sees an empty corpus and exports the full history in
+the background — no manual trigger needed. Watch Railway's deploy logs to
+follow it. Later boots skip the export because the volume still holds the
+corpus.
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /health` | none | Railway healthcheck |
+| `GET /stats` | `ADMIN_TOKEN` | what's in the corpus, and the last export result |
+| `POST /export` | `ADMIN_TOKEN` | incremental export; `?full=true` re-walks everything |
+
+If `ADMIN_TOKEN` is unset, `/stats` and `/export` return 403 — an unset secret
+means the endpoint is closed, never open.
+
+Schedule `POST /export` (Railway cron, or any scheduler) to keep the corpus
+current. It resumes from the saved cursor, so it only fetches what changed.
+
+### Running locally instead
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
+cp .env.example .env        # fill in the Zendesk values
 
-cp .env.example .env    # then fill in the Zendesk values
-```
-
-Get a Zendesk API token from **Admin Center → Apps and integrations →
-Zendesk API → Settings → Add API token**. Put it in `.env`, which is
-gitignored — never commit it, and never paste it into a chat window.
-
-### Use
-
-```bash
 evogolf verify              # check the credentials work
 evogolf export --limit 20   # trial run against 20 tickets first
 evogolf export              # full history (resumes if interrupted)
@@ -87,7 +126,7 @@ Turn this off with `REDACT_PII=false` only if you have a specific reason.
 The corpus is real customer data and UK GDPR applies:
 
 - `data/` and all `*.sqlite3` files are gitignored — the corpus must never be
-  committed to this repo
+  committed to this repo. On Railway it lives on a volume, not in the image.
 - PII redaction is on by default
 - Before go-live, decide and write down: a retention period for the corpus,
   where it is hosted, and how a deletion request propagates from Zendesk to it
@@ -133,7 +172,11 @@ src/evogolf_support/
   corpus/
     clean.py         quote/footer/signature stripping + PII redaction
     store.py         SQLite schema and upserts
-tests/               13 tests, no network required
+  api/
+    app.py           FastAPI service: health, stats, export trigger
+Dockerfile           Railway build
+railway.json         healthcheck + restart policy
+tests/               21 tests, no network required
 ```
 
 ## Tests

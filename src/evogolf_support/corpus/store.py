@@ -59,10 +59,16 @@ CREATE TABLE IF NOT EXISTS export_state (
 
 
 class CorpusStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, timeout: float = 30.0):
         self.path = path
-        self._conn = sqlite3.connect(path)
+        # The export runs in a background thread while HTTP requests read
+        # stats, so two connections touch this file at once. WAL lets readers
+        # proceed during a write, and the timeout absorbs the brief lock held
+        # at commit rather than failing with "database is locked".
+        self._conn = sqlite3.connect(path, timeout=timeout)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=%d" % int(timeout * 1000))
         self._conn.executescript(SCHEMA)
         self._conn.commit()
 
