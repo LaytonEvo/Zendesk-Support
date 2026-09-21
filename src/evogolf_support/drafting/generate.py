@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +46,29 @@ class Draft(BaseModel):
     )
 
 
+# Models occasionally render a pound sign as LaTeX (\\pounds) or leave an
+# escaped unicode sequence behind. Neither belongs in something an agent
+# pastes into a customer reply, so they are repaired rather than trusted.
+_ARTEFACTS = [
+    (re.compile(r"\\+ref\s*\{\s*\\*pounds?\s*\}"), "\u00a3"),
+    # No trailing \b: "\pounds36.99" has no word boundary between s and 3.
+    (re.compile(r"\\+pounds?"), "\u00a3"),
+    (re.compile(r"\\+u00a3"), "\u00a3"),
+    (re.compile(r"\\+textsterling"), "\u00a3"),
+    (re.compile(r"&pound;"), "\u00a3"),
+    (re.compile(r"&amp;"), "&"),
+]
+
+
+def _clean_output(text: str) -> str:
+    """Repair markup artefacts that must never reach a customer reply."""
+    if not text:
+        return text
+    for pattern, replacement in _ARTEFACTS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 PROMPT = """\
 You are drafting a support reply for Evolution Golf, a UK golf retailer, in \
 the voice of their support team. An agent will review and send it - never \
@@ -72,6 +96,15 @@ figure. Where the reply needs one, leave a clear placeholder in square \
 brackets and add an agent note.
 - Where the policy says to hand over, set hand_to_agent and explain why \
 instead of drafting around it.
+- Never state or imply that we were at fault, and never offer a refund, a \
+delivery-charge refund or any gesture, unless the ticket or the order data \
+actually shows it. If the cause is unknown, say what you are going to check. \
+A customer disputing a delivery timescale may simply have bought the standard \
+service - do not apologise for an error until one is established.
+- Write plain text only. Use the character GBP-sign directly for money \
+(for example 36.99 written with a pound sign in front). Never use LaTeX, \
+markdown escapes, backslashes or HTML entities. Separate sentences with full \
+stops and paragraphs with blank lines - never with a slash.
 """
 
 
@@ -155,6 +188,8 @@ def draft_reply(
         output_format=Draft,
     )
     result = response.parsed_output
+    result.draft = _clean_output(result.draft)
+    result.agent_notes = [_clean_output(n) for n in result.agent_notes]
     log.info(
         "Drafted for theme=%s: handover=%s confidence=%s rules=%s tickets=%s",
         theme, result.hand_to_agent, result.confidence,

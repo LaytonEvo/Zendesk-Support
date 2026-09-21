@@ -269,3 +269,38 @@ def test_policy_loads_through_the_package_not_the_working_directory():
     finally:
         os.chdir(cwd)
         policy.load.cache_clear()
+
+
+def test_currency_artefacts_are_repaired_before_an_agent_sees_them():
+    """A real draft contained \\ref{\\pounds}[AMOUNT] where a price belonged."""
+    from evogolf_support.drafting.generate import _clean_output
+
+    cases = {
+        r"refund of \ref{\pounds}[AMOUNT]": "refund of \u00a3[AMOUNT]",
+        r"is \pounds36.99 for the year": "is \u00a336.99 for the year",
+        r"\textsterling450": "\u00a3450",
+        "price \\u00a336.99": "price \u00a336.99",
+        "cost &pound;12.50": "cost \u00a312.50",
+        "Tom &amp; Jerry": "Tom & Jerry",
+    }
+    for raw, expected in cases.items():
+        assert _clean_output(raw) == expected, raw
+
+
+def test_clean_output_leaves_ordinary_text_alone():
+    from evogolf_support.drafting.generate import _clean_output
+
+    for text in ["Hi Craig, your order is on its way.",
+                 "The trolley is \u00a3449.00 including delivery.",
+                 "", "Path C:\\Users\\x"]:
+        assert _clean_output(text) == text
+
+
+def test_prompt_forbids_assuming_fault_and_markup():
+    """A draft wrongly asserted 'that is our error' and offered a refund."""
+    from evogolf_support.drafting.generate import PROMPT
+
+    lowered = PROMPT.lower()
+    assert "never state or imply that we were at fault" in lowered
+    assert "latex" in lowered
+    assert "standard service" in lowered
