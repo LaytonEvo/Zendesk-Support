@@ -1,0 +1,16 @@
+{
+  "app": {
+    "name": "Evolution Golf Draft Assistant",
+    "short_description": "Drafts a reply in the team's voice, grounded in past tickets and the live order.",
+    "long_description": "Generates a suggested reply for the open ticket using Evolution Golf's own settled policy, the way the team has answered similar tickets before, and the live Shopify order. Nothing is sent: the draft is inserted into the reply box for an agent to check, edit and send.",
+    "installation_instructions": "Set the service URL to the drafting service on Railway, and paste the admin token. The token is stored as a secure setting, so it is never visible in the browser."
+  },
+  "service_url": {
+    "label": "Service URL",
+    "helpText": "The drafting service base URL, e.g. https://support-drafting.up.railway.app"
+  },
+  "admin_token": {
+    "label": "Admin token",
+    "helpText": "The ADMIN_TOKEN set on the drafting service. Stored securely and substituted outside the browser."
+  }
+}

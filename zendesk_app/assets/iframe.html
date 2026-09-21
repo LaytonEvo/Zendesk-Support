@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Draft Assistant</title>
+<script src="https://static.zdassets.com/zendesk_app_framework_sdk/2.0/zaf_sdk.min.js"></script>
+<style>
+  :root {
+    --fg: #2f3941; --muted: #68737d; --line: #d8dcde; --bg: #fff;
+    --accent: #1f73b7; --warn-bg: #fff7ed; --warn-line: #d4884f;
+    --ok: #038153; --note-bg: #f8f9f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px;
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--fg); background: var(--bg);
+  }
+  button {
+    font: inherit; cursor: pointer; border-radius: 4px; padding: 8px 12px;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    width: 100%;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  button.secondary { background: #fff; color: var(--accent); }
+  .row { margin-top: 10px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .draft {
+    white-space: pre-wrap; border: 1px solid var(--line); border-radius: 4px;
+    padding: 10px; background: #fff; max-height: 320px; overflow-y: auto;
+  }
+  .pill {
+    display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 10px;
+    border: 1px solid var(--line); color: var(--muted); margin: 0 4px 4px 0;
+  }
+  .pill.high { border-color: var(--ok); color: var(--ok); }
+  .pill.low  { border-color: var(--warn-line); color: #96500f; }
+  .notes {
+    border: 1px solid var(--warn-line); background: var(--warn-bg);
+    border-radius: 4px; padding: 8px 10px; margin-top: 10px;
+  }
+  .notes h3 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase;
+               letter-spacing: .03em; color: #96500f; }
+  .notes ul { margin: 0; padding-left: 16px; }
+  .handover { border-color: var(--warn-line); background: var(--warn-bg);
+              border-radius: 4px; padding: 10px; border-width: 1px;
+              border-style: solid; }
+  .refs { margin-top: 8px; }
+  .err { color: #cc3340; }
+  h2 { font-size: 13px; margin: 14px 0 6px; }
+</style>
+</head>
+<body>
+  <button id="go">Generate draft</button>
+  <div id="status" class="row small muted"></div>
+  <div id="out"></div>
+
+<script>
+(function () {
+  var client = ZAFClient.init();
+  client.invoke('resize', { width: '100%', height: '160px' });
+
+  var goBtn   = document.getElementById('go');
+  var statusEl = document.getElementById('status');
+  var outEl    = document.getElementById('out');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c];
+    });
+  }
+
+  function fit() {
+    var h = Math.min(Math.max(document.body.scrollHeight + 20, 160), 900);
+    client.invoke('resize', { width: '100%', height: h + 'px' });
+  }
+
+  function setStatus(text, isError) {
+    statusEl.className = 'row small ' + (isError ? 'err' : 'muted');
+    statusEl.textContent = text;
+    fit();
+  }
+
+  function render(d) {
+    outEl.innerHTML = '';
+
+    if (d.hand_to_agent) {
+      var box = document.createElement('div');
+      box.className = 'row handover';
+      box.innerHTML = '<strong>Needs an agent</strong><div class="small row">'
+        + esc(d.handover_reason || 'The policy says a person should handle this.')
+        + '</div>';
+      outEl.appendChild(box);
+      fit();
+      return;
+    }
+
+    var meta = document.createElement('div');
+    meta.className = 'row';
+    var conf = (d.confidence || '').toLowerCase();
+    meta.innerHTML = '<span class="pill ' + esc(conf) + '">confidence: '
+      + esc(d.confidence || '?') + '</span>'
+      + (d.rules_applied && d.rules_applied.length
+          ? '<span class="pill">rules ' + esc(d.rules_applied.join(', ')) + '</span>' : '');
+    outEl.appendChild(meta);
+
+    var h = document.createElement('h2');
+    h.textContent = 'Suggested reply';
+    outEl.appendChild(h);
+
+    var draft = document.createElement('div');
+    draft.className = 'draft';
+    draft.textContent = d.draft || '';
+    outEl.appendChild(draft);
+
+    if (d.agent_notes && d.agent_notes.length) {
+      var notes = document.createElement('div');
+      notes.className = 'notes';
+      notes.innerHTML = '<h3>Check before sending</h3><ul>'
+        + d.agent_notes.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('')
+        + '</ul>';
+      outEl.appendChild(notes);
+    }
+
+    var insert = document.createElement('button');
+    insert.className = 'row';
+    insert.textContent = 'Insert into reply';
+    insert.onclick = function () {
+      client.invoke('ticket.comment.appendText', d.draft || '');
+      insert.textContent = 'Inserted — check it before sending';
+      insert.disabled = true;
+    };
+    outEl.appendChild(insert);
+
+    if (d.tickets_referenced && d.tickets_referenced.length) {
+      var refs = document.createElement('div');
+      refs.className = 'refs small muted';
+      refs.textContent = 'Based on past tickets: '
+        + d.tickets_referenced.map(function (t) { return '#' + t; }).join(', ');
+      outEl.appendChild(refs);
+    }
+    fit();
+  }
+
+  goBtn.addEventListener('click', function () {
+    goBtn.disabled = true;
+    outEl.innerHTML = '';
+    setStatus('Reading the ticket…');
+
+    client.get(['ticket.subject', 'ticket.description', 'ticket.requester.email'])
+      .then(function (data) {
+        return client.metadata().then(function (meta) {
+          var base = String(meta.settings.service_url || '').replace(/\/+$/, '');
+          if (!base) { throw new Error('Service URL is not set in the app settings.'); }
+          setStatus('Drafting… this usually takes a few seconds.');
+          return client.request({
+            url: base + '/draft',
+            type: 'POST',
+            contentType: 'application/json',
+            // The token is a secure setting: Zendesk substitutes it outside
+            // the browser, so it never appears in dev tools or this page.
+            headers: { 'Authorization': 'Bearer {{setting.admin_token}}' },
+            secure: true,
+            data: JSON.stringify({
+              subject: data['ticket.subject'] || '',
+              body: data['ticket.description'] || '',
+              requester_email: data['ticket.requester.email'] || null
+            })
+          });
+        });
+      })
+      .then(function (res) {
+        var d = typeof res === 'string' ? JSON.parse(res) : res;
+        setStatus('');
+        render(d);
+      })
+      .catch(function (err) {
+        var msg = (err && (err.responseText || err.message)) || 'Request failed.';
+        setStatus('Could not draft: ' + msg, true);
+      })
+      .then(function () { goBtn.disabled = false; });
+  });
+
+  fit();
+})();
+</script>
+</body>
+</html>

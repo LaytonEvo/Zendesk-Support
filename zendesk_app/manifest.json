@@ -1,0 +1,34 @@
+{
+  "name": "Evolution Golf Draft Assistant",
+  "author": {
+    "name": "Evolution Golf",
+    "email": "online@evolutiongolf.co.uk"
+  },
+  "defaultLocale": "en",
+  "private": true,
+  "singleInstall": true,
+  "version": "1.0.0",
+  "frameworkVersion": "2.0",
+  "location": {
+    "support": {
+      "ticket_sidebar": {
+        "url": "assets/iframe.html",
+        "flexible": true
+      }
+    }
+  },
+  "parameters": [
+    {
+      "name": "service_url",
+      "type": "text",
+      "required": true,
+      "secure": false
+    },
+    {
+      "name": "admin_token",
+      "type": "text",
+      "required": true,
+      "secure": true
+    }
+  ]
+}

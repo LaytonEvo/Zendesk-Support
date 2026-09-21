@@ -239,3 +239,33 @@ def test_evaluation_hides_the_team_reply_from_the_draft(tmp_path, monkeypatch):
     assert "we can help" in result["team_actually_replied"].lower()
     # The actual reply is recorded for comparison, never fed to the model.
     assert result["team_actually_replied"] not in str(seen)
+
+
+def test_policy_data_file_is_declared_as_package_data():
+    """Regression: rules.json is data, so setuptools omits it unless told.
+
+    An editable install reads it straight from src and passes; the deployed
+    wheel did not contain it, and every draft failed with a missing file.
+    """
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    config = tomllib.loads((root / "pyproject.toml").read_text())
+    package_data = config["tool"]["setuptools"]["package-data"]
+    assert "*.json" in package_data["evogolf_support.policy"]
+
+
+def test_policy_loads_through_the_package_not_the_working_directory():
+    """Loading must not depend on where the process was started from."""
+    import os
+    from evogolf_support import policy
+
+    cwd = os.getcwd()
+    try:
+        os.chdir("/")
+        policy.load.cache_clear()
+        assert len(policy.load()["rules"]) == 16
+    finally:
+        os.chdir(cwd)
+        policy.load.cache_clear()

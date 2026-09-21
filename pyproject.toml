@@ -24,5 +24,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# rules.json is data, not code, so setuptools leaves it out of the wheel
+# unless told. Without this the service installs cleanly and then fails on
+# the first draft with a missing-file error.
+[tool.setuptools.package-data]
+"evogolf_support.policy" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
