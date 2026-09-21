@@ -21,7 +21,8 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -34,7 +35,7 @@ from ..mining.discover import Taxonomy, classify_tickets, discover_themes
 from ..mining.run import GUIDE_KEY, run_mining
 from ..drafting.generate import Draft, draft_reply
 from ..drafting.retrieve import rebuild_index
-from ..drafting import shopify
+from ..drafting import shopify, shopify_oauth
 from ..drafting.evaluate import run_evaluation
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
@@ -446,6 +447,69 @@ def draft(req: DraftRequest) -> Draft:
 def reindex() -> dict[str, int]:
     with CorpusStore(corpus_path()) as store:
         return {"indexed": rebuild_index(store)}
+
+
+@app.get("/shopify/install", dependencies=[Depends(require_admin)])
+def shopify_install(request: Request) -> RedirectResponse:
+    """Start the one-off install of the app on the store."""
+    shop = shopify_oauth.expected_shop()
+    if not shopify_oauth.valid_shop(shop):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "SHOPIFY_STORE_DOMAIN must be a myshopify.com domain.",
+        )
+    redirect_uri = str(request.url_for("shopify_callback")).replace("http://", "https://")
+    nonce = shopify_oauth.new_nonce()
+    log.info("Starting Shopify install for %s, redirecting to Shopify", shop)
+    return RedirectResponse(shopify_oauth.install_url(shop, redirect_uri, nonce))
+
+
+@app.get("/shopify/callback", name="shopify_callback")
+def shopify_callback(request: Request) -> Response:
+    """Shopify's redirect after the merchant approves the app.
+
+    Shopify cannot present our admin token, so the signature and the
+    single-use nonce are the only things standing between this endpoint and
+    the internet. Every check is mandatory and failures say nothing useful
+    to a caller.
+    """
+    params = dict(request.query_params)
+    shop = (params.get("shop") or "").lower()
+
+    if not shopify_oauth.valid_shop(shop) or shop != shopify_oauth.expected_shop():
+        log.warning("Shopify callback rejected: unexpected shop %r", shop)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid request.")
+    if not shopify_oauth.verify_hmac(params):
+        log.warning("Shopify callback rejected: signature did not verify")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid request.")
+    if not shopify_oauth.consume_nonce(params.get("state", "")):
+        log.warning("Shopify callback rejected: unknown or reused state")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid request.")
+    code = params.get("code")
+    if not code:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid request.")
+
+    try:
+        payload = shopify_oauth.exchange_code(shop, code)
+    except Exception as exc:
+        log.exception("Shopify code exchange failed: %s", exc)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not complete the install.")
+
+    with CorpusStore(corpus_path()) as store:
+        shopify_oauth.store_token(store, payload["access_token"])
+
+    scopes = payload.get("scope", "")
+    log.info("Shopify app installed on %s; granted scopes: %s", shop, scopes)
+    if "read_all_orders" not in scopes:
+        log.warning(
+            "read_all_orders was NOT granted: lookups will return nothing for "
+            "orders older than 60 days."
+        )
+    return Response(
+        "Evolution Golf drafting service is now connected to Shopify. "
+        "You can close this tab.",
+        media_type="text/plain",
+    )
 
 
 @app.get("/quality", dependencies=[Depends(require_admin)])

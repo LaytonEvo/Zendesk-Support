@@ -85,7 +85,7 @@ def _store_domain() -> str:
 
 
 def configured() -> bool:
-    """True when we can obtain a token, either grant or legacy."""
+    """True when we can obtain a token by any route."""
     load_dotenv()
     if not _store_domain():
         return False
@@ -95,6 +95,11 @@ def configured() -> bool:
         os.environ.get("SHOPIFY_CLIENT_ID", "").strip()
         and os.environ.get("SHOPIFY_CLIENT_SECRET", "").strip()
     )
+
+
+def installed() -> bool:
+    """True when the app has been installed on the store via OAuth."""
+    return bool(_oauth_token())
 
 
 def _fetch_token() -> tuple[str, float, str]:
@@ -131,12 +136,38 @@ def _fetch_token() -> tuple[str, float, str]:
     return token, time.time() + expires_in - TOKEN_SAFETY_MARGIN, scopes
 
 
+def _oauth_token() -> str | None:
+    """A token stored by the install flow, if the app has been installed."""
+    try:
+        from ..config import corpus_path
+        from ..corpus.store import CorpusStore
+        from .shopify_oauth import stored_token
+
+        path = corpus_path()
+        if not path.exists():
+            return None
+        with CorpusStore(path) as store:
+            return stored_token(store)
+    except Exception as exc:
+        log.warning("Could not read the stored Shopify token: %s", exc)
+        return None
+
+
 def access_token() -> str:
-    """A usable Admin API token, refreshed when the cached one is near expiry."""
+    """A usable Admin API token.
+
+    Order of preference: an explicitly configured token, then one obtained by
+    installing the app on the store, then the client credentials grant - which
+    only works for stores inside the app's own Shopify organization.
+    """
     load_dotenv()
     legacy = os.environ.get("SHOPIFY_ACCESS_TOKEN", "").strip()
     if legacy:
         return legacy  # an older admin-created app, still valid if you have one
+
+    installed = _oauth_token()
+    if installed:
+        return installed
 
     with _token_lock:
         if _token_cache["value"] and time.time() < _token_cache["expires_at"]:
