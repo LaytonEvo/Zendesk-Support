@@ -113,6 +113,7 @@ def run_evaluation(store: CorpusStore, limit: int, theme: str | None = None) -> 
     ids = sample_tickets(store, limit, theme)
     log.info("Evaluating drafts against %s real tickets", len(ids))
     done = 0
+    with_orders = 0
     for ticket_id in ids:
         try:
             result = evaluate_ticket(store, ticket_id)
@@ -122,5 +123,10 @@ def run_evaluation(store: CorpusStore, limit: int, theme: str | None = None) -> 
         if result:
             log.info("eval/%s: %s", ticket_id, json.dumps(result))
             done += 1
-    log.info("eval/done: %s drafts", done)
+            with_orders += 1 if result.get("order_context_found") else 0
+    log.info(
+        "eval/done: %s drafts, %s with live order data%s",
+        done, with_orders,
+        "" if shopify.configured() else " (Shopify is not configured)",
+    )
     return done

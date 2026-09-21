@@ -254,6 +254,24 @@ def log_requested_evidence() -> None:
         log.warning("Could not assemble evidence: %s", exc)
 
 
+def log_integration_status() -> None:
+    """Say plainly which integrations are live.
+
+    Silence is ambiguous: a mistyped variable name and a working lookup that
+    simply found no order produce the same empty result. This makes the
+    difference visible on every boot.
+    """
+    if shopify.configured():
+        log.info("Shopify order lookup: configured")
+    else:
+        log.warning(
+            "Shopify order lookup: NOT configured - drafts will leave order "
+            "status, tracking and figures as placeholders. Set "
+            "SHOPIFY_STORE_DOMAIN plus SHOPIFY_CLIENT_ID and "
+            "SHOPIFY_CLIENT_SECRET (or a legacy SHOPIFY_ACCESS_TOKEN)."
+        )
+
+
 def rebuild_search_index() -> None:
     """Keep retrieval in step with the corpus. Cheap - no API calls."""
     try:
@@ -349,6 +367,7 @@ def kick_off_first_export() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    log_integration_status()
     reclean_if_rules_changed()
     rebuild_search_index()
     log_quality_report()
