@@ -66,13 +66,20 @@ def test_delivered_orders_are_never_flagged(monkeypatch):
 
 
 def test_in_transit_beyond_five_working_days_is_flagged(monkeypatch):
+    """Needs a delivered order in the window to prove the courier feed works."""
     now = MON + dt.timedelta(days=9)   # 7 working days
-    orders = [_order("#1", MON, "FULFILLED", [
-        {"createdAt": MON.isoformat().replace("+00:00", "Z"),
-         "displayStatus": "IN_TRANSIT",
-         "trackingInfo": [{"company": "DPD", "number": "123"}]}])]
+    orders = [
+        _order("#0", MON, "FULFILLED", [
+            {"createdAt": MON.isoformat().replace("+00:00", "Z"),
+             "displayStatus": "DELIVERED", "trackingInfo": []}]),
+        _order("#1", MON, "FULFILLED", [
+            {"createdAt": MON.isoformat().replace("+00:00", "Z"),
+             "displayStatus": "IN_TRANSIT",
+             "trackingInfo": [{"company": "DPD", "number": "123"}]}]),
+    ]
     found = _run_detect(monkeypatch, orders, now)
     assert [f.reason for f in found] == ["stuck_in_transit"]
+    assert found[0].order_name == "#1"
     assert found[0].tracking == "DPD 123"
 
 
@@ -287,3 +294,65 @@ def test_the_browser_reachable_endpoint_can_never_raise_a_ticket(client, monkeyp
 def test_the_real_sweep_still_requires_a_post_and_a_header(client):
     assert client.get("/proactive/sweep", params={"token": "tok"}).status_code == 405
     assert client.post("/proactive/sweep").status_code == 401
+
+
+# --- the 61-false-positive regression ------------------------------------
+
+def _fulfilled(name, created, status):
+    return _order(name, created, "FULFILLED", [
+        {"createdAt": created.isoformat().replace("+00:00", "Z"),
+         "displayStatus": status, "trackingInfo": []}])
+
+
+def test_dispatched_is_not_in_transit(monkeypatch):
+    """FULFILLED means 'we handed it over', not 'the courier has it'.
+
+    Regression: a real preview flagged 61 orders as stuck in transit at 17-31
+    working days - the shop's entire shipping book. Their courier never feeds
+    status back, so every fulfilment sat at FULFILLED forever and eventually
+    tripped the clock.
+    """
+    now = MON + dt.timedelta(days=45)
+    orders = [_fulfilled(f"#{i}", MON, "FULFILLED") for i in range(60)]
+    assert _run_detect(monkeypatch, orders, now) == []
+
+
+def test_merchant_side_statuses_are_never_treated_as_transit(monkeypatch):
+    now = MON + dt.timedelta(days=45)
+    for status in ("SUBMITTED", "CONFIRMED", "LABEL_PRINTED",
+                   "LABEL_PURCHASED", "MARKED_AS_FULFILLED"):
+        orders = [_fulfilled("#1", MON, status)]
+        assert _run_detect(monkeypatch, orders, now) == [], status
+
+
+def test_in_transit_is_used_when_the_courier_feed_demonstrably_works(monkeypatch):
+    """One delivered order in the window proves the feed reports back."""
+    now = MON + dt.timedelta(days=45)
+    orders = [_fulfilled(f"#{i}", MON, "DELIVERED") for i in range(5)]
+    orders.append(_fulfilled("#99", MON, "IN_TRANSIT"))
+    found = _run_detect(monkeypatch, orders, now)
+    assert [f.order_name for f in found] == ["#99"]
+
+
+def test_in_transit_is_ignored_when_nothing_ever_reaches_delivered(monkeypatch):
+    """Without a terminal status anywhere, 'in transit' carries no meaning."""
+    now = MON + dt.timedelta(days=45)
+    orders = [_fulfilled(f"#{i}", MON, "IN_TRANSIT") for i in range(30)]
+    assert _run_detect(monkeypatch, orders, now) == []
+
+
+def test_courier_failures_are_still_caught_without_a_working_feed(monkeypatch):
+    """An explicit failure is the courier telling us something, feed or not."""
+    now = MON + dt.timedelta(days=45)
+    orders = [_fulfilled(f"#{i}", MON, "FULFILLED") for i in range(20)]
+    orders.append(_fulfilled("#7", MON, "ATTEMPTED_DELIVERY"))
+    found = _run_detect(monkeypatch, orders, now)
+    assert [(f.order_name, f.reason) for f in found] == [("#7", "delivery_problem")]
+
+
+def test_undispatched_orders_are_unaffected_by_the_feed_question(monkeypatch):
+    now = MON + dt.timedelta(days=45)
+    orders = [_fulfilled(f"#{i}", MON, "FULFILLED") for i in range(20)]
+    orders.append(_order("#5", MON))          # paid, never dispatched
+    found = _run_detect(monkeypatch, orders, now)
+    assert [(f.order_name, f.reason) for f in found] == [("#5", "not_dispatched")]

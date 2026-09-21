@@ -469,13 +469,24 @@ def proactive_preview(request: Request, token: str = "") -> Response:
     if not supplied or not secrets.compare_digest(supplied, admin):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
 
-    from ..proactive.detect import find_at_risk
+    from ..proactive.detect import TERMINAL_STATUSES, find_at_risk, status_summary
 
     try:
         at_risk = find_at_risk()
+        statuses = status_summary()
     except Exception as exc:
         log.exception("Delay preview failed: %s", exc)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not read orders.")
+
+    status_line = ", ".join(f"{k} x{v}" for k, v in sorted(statuses.items())) or "none"
+    feed_works = bool(TERMINAL_STATUSES & set(statuses))
+    feed_note = (
+        "" if feed_works or not statuses else
+        "Nothing reaches DELIVERED, so your courier is not feeding delivery status "
+        "back into Shopify. The in-transit check is therefore switched off \u2014 it "
+        "would flag every dispatched order. Undispatched orders and explicit courier "
+        "failures are still checked."
+    )
 
     rows = "".join(
         f"<tr><td>{html_escape(i.order_name)}</td>"
@@ -505,7 +516,9 @@ created and no customer has been contacted.</p>
 {'<table><tr><th>Order</th><th>Customer</th><th>Reason</th><th>Detail</th><th>Items</th></tr>'
  + rows + '</table>' if at_risk else '<div class="none">Nothing is running late.</div>'}
 <div class="note">Thresholds: undispatched beyond 3 working days, in transit beyond
-5 working days, plus any courier-reported failure. Weekends excluded.</div>
+5 working days, plus any courier-reported failure. Weekends excluded.<br><br>
+Fulfilment statuses Shopify reports for this store:
+<strong>{html_escape(status_line)}</strong>. {html_escape(feed_note)}</div>
 </div>"""
     return Response(body, media_type="text/html")
 
