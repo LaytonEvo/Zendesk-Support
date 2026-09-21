@@ -230,3 +230,60 @@ def test_dry_run_raises_nothing(tmp_path, monkeypatch):
                         lambda item, draft: pytest.fail("dry run must not raise"))
     monkeypatch.setattr(run, "send_digest", lambda lines: True)
     assert run.run_sweep(dry_run=True)["tickets"] == 0
+
+
+# --- the browser-openable preview ----------------------------------------
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from evogolf_support.api import app as app_module
+
+    monkeypatch.setenv("AUTO_EXPORT", "false")
+    monkeypatch.setenv("AUTO_MINE", "false")
+    monkeypatch.setenv("CORPUS_DB", str(tmp_path / "c.sqlite3"))
+    monkeypatch.setenv("ADMIN_TOKEN", "tok")
+    with TestClient(app_module.app) as c:
+        yield c
+
+
+def test_preview_opens_with_a_token_in_the_url(client, monkeypatch):
+    monkeypatch.setattr(detect, "find_at_risk", lambda: [_item()])
+    r = client.get("/proactive/preview", params={"token": "tok"})
+    assert r.status_code == 200
+    assert "#29457" in r.text and "Craig Whitfield" in r.text
+    assert "no customer has been contacted" in r.text
+
+
+def test_preview_rejects_a_wrong_token(client):
+    assert client.get("/proactive/preview", params={"token": "no"}).status_code == 401
+    assert client.get("/proactive/preview").status_code == 401
+
+
+def test_preview_says_so_when_nothing_is_late(client, monkeypatch):
+    monkeypatch.setattr(detect, "find_at_risk", lambda: [])
+    r = client.get("/proactive/preview", params={"token": "tok"})
+    assert "Nothing is running late" in r.text
+
+
+def test_preview_escapes_order_and_customer_data(client, monkeypatch):
+    """Order and customer text comes from Shopify and lands in a page."""
+    item = _item()
+    item.customer_name = '<script>alert(1)</script>'
+    monkeypatch.setattr(detect, "find_at_risk", lambda: [item])
+    r = client.get("/proactive/preview", params={"token": "tok"})
+    assert "<script>alert(1)</script>" not in r.text
+    assert "&lt;script&gt;" in r.text
+
+
+def test_the_browser_reachable_endpoint_can_never_raise_a_ticket(client, monkeypatch):
+    """A GET can be re-requested by a prefetcher or a bookmark."""
+    monkeypatch.setattr(detect, "find_at_risk", lambda: [_item()])
+    monkeypatch.setattr(run, "raise_ticket",
+                        lambda item, draft: pytest.fail("preview must not raise tickets"))
+    assert client.get("/proactive/preview", params={"token": "tok"}).status_code == 200
+
+
+def test_the_real_sweep_still_requires_a_post_and_a_header(client):
+    assert client.get("/proactive/sweep", params={"token": "tok"}).status_code == 405
+    assert client.post("/proactive/sweep").status_code == 401

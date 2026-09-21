@@ -25,6 +25,8 @@ from typing import Any, AsyncIterator
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from html import escape as html_escape
+
 from pydantic import BaseModel
 
 from ..config import ConfigError, corpus_path, redact_pii
@@ -446,6 +448,66 @@ def draft(req: DraftRequest) -> Draft:
             theme=req.theme,
             order_context=order_context,
         )
+
+
+@app.get("/proactive/preview")
+def proactive_preview(request: Request, token: str = "") -> Response:
+    """Show what the delay sweep would flag, as a readable page.
+
+    Deliberately GET-and-dry-run-only. A URL can be re-requested by a browser,
+    a prefetcher or a bookmark, so the one that is reachable that way must
+    never be able to raise a ticket. The real sweep stays a POST.
+    """
+    admin = _admin_token()
+    if not admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "ADMIN_TOKEN is not set, so this endpoint is disabled.",
+        )
+    header = request.headers.get("authorization", "")
+    supplied = token or (header[7:] if header.lower().startswith("bearer ") else "")
+    if not supplied or not secrets.compare_digest(supplied, admin):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
+
+    from ..proactive.detect import find_at_risk
+
+    try:
+        at_risk = find_at_risk()
+    except Exception as exc:
+        log.exception("Delay preview failed: %s", exc)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not read orders.")
+
+    rows = "".join(
+        f"<tr><td>{html_escape(i.order_name)}</td>"
+        f"<td>{html_escape(i.customer_name or '-')}</td>"
+        f"<td>{html_escape(i.reason.replace('_', ' '))}</td>"
+        f"<td>{html_escape(i.detail)}</td>"
+        f"<td>{html_escape(i.items[:70])}</td></tr>"
+        for i in at_risk
+    )
+    body = f"""<!doctype html><meta charset="utf-8">
+<title>Delay sweep preview</title>
+<style>
+ body{{font:15px/1.5 system-ui,sans-serif;margin:0;padding:28px 20px;color:#1a2b30;background:#f4f6f6}}
+ .card{{max-width:1000px;margin:0 auto;background:#fff;border:1px solid #d8dcdd;border-radius:8px;padding:22px}}
+ h1{{font-size:21px;margin:0 0 4px}} p{{color:#55686e;margin:0 0 18px}}
+ table{{border-collapse:collapse;width:100%;font-size:13.5px}}
+ th{{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+     color:#74898f;border-bottom:1px solid #d8dcdd;padding:8px 10px}}
+ td{{padding:9px 10px;border-bottom:1px solid #eceff0;vertical-align:top}}
+ .none{{padding:26px;text-align:center;color:#55686e}}
+ .note{{margin-top:18px;font-size:13px;color:#74898f}}
+</style>
+<div class="card">
+<h1>Delay sweep preview</h1>
+<p><strong>{len(at_risk)}</strong> order(s) would be flagged. Nothing has been
+created and no customer has been contacted.</p>
+{'<table><tr><th>Order</th><th>Customer</th><th>Reason</th><th>Detail</th><th>Items</th></tr>'
+ + rows + '</table>' if at_risk else '<div class="none">Nothing is running late.</div>'}
+<div class="note">Thresholds: undispatched beyond 3 working days, in transit beyond
+5 working days, plus any courier-reported failure. Weekends excluded.</div>
+</div>"""
+    return Response(body, media_type="text/html")
 
 
 @app.post("/proactive/sweep", dependencies=[Depends(require_admin)])
