@@ -160,6 +160,40 @@ tickets and which order it used, so an agent can sanity-check it in seconds.
 
 ---
 
+## Built but not switched on — the proactive delay sweep
+
+**This is parked, not finished. It needs turning on.**
+
+The delay sweep is written, tested and deployed. It finds orders that are
+paid but undispatched beyond three working days, or shipped and undelivered
+beyond five, drafts the message to send, raises an internal Zendesk ticket
+and posts a digest to Slack. Nothing reaches a customer without an agent
+sending it.
+
+**Nothing runs it.** There is no scheduler, so it has never fired on its own
+and never will until one exists. Parked in September 2026 to get the reply
+drafts in front of the team first.
+
+To switch it on:
+
+1. Add a Railway cron (or any scheduler) that calls
+   `POST /proactive/sweep` with the admin token, once each working morning.
+2. Watch the first few days in Slack before trusting it unattended.
+
+What to know before you do:
+
+- It raises up to 15 tickets per sweep. Above that it raises none and posts
+  the list to Slack instead, because forty late orders is one supplier
+  problem, not forty conversations.
+- `GET /proactive/preview?token=...` shows what it *would* raise, today,
+  without raising anything. Start there.
+- Slow-delivery detection works for Royal Mail and **cannot** work for DPD
+  until DPD delivery status reaches Shopify — DPD fulfilments never leave
+  `FULFILLED`, so a lost parcel and a delivered one are the same record.
+  Undispatched orders are unaffected and are checked for every carrier.
+- Decide who owns the queue before it starts. Fifteen tickets a morning is
+  fifteen tickets nobody asked for.
+
 ## Layout
 
 ```
