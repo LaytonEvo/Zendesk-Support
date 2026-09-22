@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
+import random
 import re
+import time
 from email.utils import parseaddr
 from typing import Any, Iterator
 
@@ -40,6 +43,8 @@ CUSTOMER_LABELS = ["Customer Email Enquiries", "Custom Fitting Enquiries"]
 # imported conversations live in a reserved range well clear of both. It is
 # derived from the thread id rather than assigned, so re-running the import
 # updates a conversation instead of duplicating it.
+DONE_KEY = "gmail_imported_threads"
+
 ID_BASE = 2_000_000_000
 ID_SPAN = 1_000_000_000
 
@@ -56,15 +61,48 @@ def person_key(email: str) -> int:
     return ID_BASE + int(digest, 16) % ID_SPAN
 
 
+# Gmail answers a rate limit with 403, not 429, and the reason is only in
+# the body. Treating every 403 as fatal stops the import; treating every 403
+# as a rate limit would retry a genuine permission failure forever.
+_RETRYABLE = {"ratelimitexceeded", "userratelimitexceeded", "backenderror",
+              "quotaexceeded", "internalerror"}
+MAX_RETRIES = 6
+# Gmail allows 250 quota units per user per second and a thread fetch costs
+# ten, so requests are spaced rather than fired as fast as they will go. The
+# first run did the latter and was throttled after 55 conversations.
+PACE_SECONDS = 0.12
+
+
+def _retryable(response: httpx.Response) -> bool:
+    if response.status_code == 429 or response.status_code >= 500:
+        return True
+    if response.status_code != 403:
+        return False
+    try:
+        errors = response.json().get("error", {}).get("errors", [])
+    except Exception:                                   # noqa: BLE001
+        return False
+    return any((e.get("reason") or "").lower() in _RETRYABLE for e in errors)
+
+
 def _get(path: str, token: str, **params: Any) -> dict[str, Any]:
-    response = httpx.get(
-        f"{API}/{path}",
-        headers={"Authorization": f"Bearer {token}"},
-        params=params or None,
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()
+    """GET from Gmail, backing off when throttled."""
+    for attempt in range(MAX_RETRIES):
+        response = httpx.get(
+            f"{API}/{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params or None,
+            timeout=30.0,
+        )
+        if response.status_code < 400:
+            time.sleep(PACE_SECONDS)
+            return response.json()
+        if not _retryable(response) or attempt == MAX_RETRIES - 1:
+            response.raise_for_status()
+        wait = min(2.0 ** attempt, 30.0) + random.uniform(0, 0.5)
+        log.info("Gmail throttled on %s; waiting %.1fs", path, wait)
+        time.sleep(wait)
+    raise RuntimeError(f"Gave up on Gmail {path} after {MAX_RETRIES} attempts")
 
 
 def label_ids(token: str, names: list[str]) -> dict[str, str]:
@@ -150,13 +188,19 @@ def import_threads(store: CorpusStore, limit: int | None = None) -> dict[str, in
     store.upsert_users([{"id": agent_id, "name": "Evo Support Team",
                          "email": "online@evolutiongolf.co.uk", "role": "agent"}])
 
+    # A run that stops half way - throttled, redeployed - must not start
+    # again from the beginning. Threads already in are recorded and skipped.
+    done = set(json.loads(store.get_state(DONE_KEY) or "[]"))
     seen: set[str] = set()
-    result = {"threads": 0, "messages": 0, "skipped_empty": 0}
+    result = {"threads": 0, "messages": 0, "skipped_empty": 0, "already_in": 0}
     for name, label_id in labels.items():
         for tid in thread_ids(token, label_id):
             if tid in seen:
                 continue                                # a thread can carry both labels
             seen.add(tid)
+            if tid in done:
+                result["already_in"] += 1
+                continue
             if limit is not None and result["threads"] >= limit:
                 log.info("gmail/import stopped at the %s-thread limit", limit)
                 return result
@@ -170,6 +214,12 @@ def import_threads(store: CorpusStore, limit: int | None = None) -> dict[str, in
                 result["messages"] += added
             else:
                 result["skipped_empty"] += 1
+            done.add(tid)
+            if (result["threads"] + result["skipped_empty"]) % 25 == 0:
+                # Checkpoint as we go, so progress survives an interruption.
+                store.set_state(DONE_KEY, json.dumps(sorted(done)))
+                log.info("gmail/import progress: %s", result)
+    store.set_state(DONE_KEY, json.dumps(sorted(done)))
     log.info("gmail/import: %s", result)
     return result
 

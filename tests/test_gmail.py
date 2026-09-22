@@ -8,6 +8,8 @@ is read-only and the import is re-runnable rather than additive.
 
 import base64
 
+import httpx
+
 import pytest
 
 from evogolf_support.corpus.store import CorpusStore
@@ -243,3 +245,73 @@ def test_redaction_also_covers_our_own_log_lines():
                                "Opened https://host/google/install?token=secret99", (), None)
     _RedactQueryToken().filter(record)
     assert "secret99" not in record.getMessage()
+
+
+# --- throttling ----------------------------------------------------------
+#
+# The first live run imported 55 conversations then hit a wall of 403s.
+# Gmail answers a rate limit with 403 and puts the reason only in the body,
+# so every request after that looked like a permission failure and the
+# import gave up with four fifths of the history still outside the corpus.
+
+class _Resp:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+
+def _rate_limited():
+    return _Resp(403, {"error": {"errors": [{"reason": "userRateLimitExceeded"}]}})
+
+
+def _forbidden():
+    return _Resp(403, {"error": {"errors": [{"reason": "insufficientPermissions"}]}})
+
+
+def test_a_rate_limit_is_waited_out_not_given_up_on(monkeypatch):
+    calls = []
+    replies = [_rate_limited(), _rate_limited(), _Resp(200, {"ok": True})]
+    monkeypatch.setattr(ingest.httpx, "get",
+                        lambda *a, **k: calls.append(1) or replies[len(calls) - 1])
+    monkeypatch.setattr(ingest.time, "sleep", lambda s: None)
+    assert ingest._get("threads/t1", "tok") == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_a_real_permission_failure_is_not_retried(monkeypatch):
+    """Retrying a genuine 403 forever would hide the actual problem."""
+    calls = []
+    monkeypatch.setattr(ingest.httpx, "get",
+                        lambda *a, **k: calls.append(1) or _forbidden())
+    monkeypatch.setattr(ingest.time, "sleep", lambda s: None)
+    with pytest.raises(httpx.HTTPStatusError):
+        ingest._get("threads/t1", "tok")
+    assert len(calls) == 1
+
+
+def test_requests_are_paced(monkeypatch):
+    """Firing as fast as the API allows is what caused the throttling."""
+    waits = []
+    monkeypatch.setattr(ingest.httpx, "get", lambda *a, **k: _Resp(200, {}))
+    monkeypatch.setattr(ingest.time, "sleep", waits.append)
+    ingest._get("threads", "tok")
+    assert waits and waits[0] == ingest.PACE_SECONDS
+
+
+def test_an_interrupted_import_resumes(store, gmail):
+    """Redeploys and throttling both stop a run part way through."""
+    _thread(gmail, "t1", [_msg("m1", "a@b.c", "Q?"), _msg("m2", AGENT, "A.")])
+    ingest.import_threads(store)
+    before = len(gmail["calls"])
+
+    result = ingest.import_threads(store)
+    assert result["already_in"] == 1 and result["threads"] == 0
+    # The second run lists the labels and threads, but re-fetches nothing.
+    assert not any(p.startswith("threads/") for p, _ in gmail["calls"][before:])
