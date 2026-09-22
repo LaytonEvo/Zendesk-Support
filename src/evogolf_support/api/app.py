@@ -45,6 +45,7 @@ from ..drafting.evaluate import run_evaluation
 from ..proactive.run import run_sweep
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
+from .. import slack
 from ..zendesk import suggest
 
 log = logging.getLogger(__name__)
@@ -290,6 +291,14 @@ def log_integration_status() -> None:
         )
     else:
         log.warning("Ticket webhook: NOT configured - no drafts will be posted.")
+
+    if slack.configured():
+        log.info("Slack: configured - drafts and the delay digest will be posted")
+    else:
+        log.warning(
+            "Slack: NOT configured - drafts go to the ticket only. Set "
+            "SLACK_WEBHOOK_URL to have them posted where someone will see them."
+        )
 
 
 def rebuild_search_index() -> None:

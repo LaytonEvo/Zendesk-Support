@@ -18,6 +18,7 @@ import logging
 import os
 from typing import Any
 
+from .. import slack
 from ..config import load_dotenv
 from ..corpus.store import CorpusStore
 from ..drafting import shopify
@@ -201,6 +202,15 @@ def suggest_for_ticket(ticket_id: int, corpus: Any) -> str:
             )
             client.add_internal_note(ticket_id, format_note(draft))
             _record_suggested(store, ticket_id, comment_id)
+
+    # After the note, never instead of it. Slack is where someone reads
+    # this; the ticket is where it has to be. If Slack fails, the draft is
+    # still on the ticket and the agent still has it.
+    try:
+        slack.post_draft(ticket_id, subject, body, draft)
+    except Exception as exc:                            # noqa: BLE001
+        log.warning("Draft posted to ticket %s but not to Slack: %s",
+                    ticket_id, exc)
 
     log.info("Suggested a reply on ticket %s (handover=%s)",
              ticket_id, draft.hand_to_agent)

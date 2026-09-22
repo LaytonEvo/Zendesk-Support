@@ -12,8 +12,7 @@ import logging
 import os
 from typing import Any
 
-import httpx
-
+from .. import slack
 from ..config import load_dotenv
 from ..corpus.store import CorpusStore
 from ..drafting.generate import Draft, draft_reply
@@ -137,16 +136,4 @@ def raise_ticket(item: AtRisk, draft: Draft) -> int | None:
 
 def send_digest(lines: list[str]) -> bool:
     """Post the morning summary to Slack, if a webhook is configured."""
-    load_dotenv()
-    url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-    if not url:
-        log.info("No SLACK_WEBHOOK_URL set - digest logged only")
-        return False
-    text = "*Orders needing a proactive update*\n" + "\n".join(lines)
-    try:
-        response = httpx.post(url, json={"text": text}, timeout=15.0)
-        response.raise_for_status()
-        return True
-    except Exception as exc:
-        log.warning("Could not post the digest to Slack: %s", exc)
-        return False
+    return slack.post("*Orders needing a proactive update*\n" + "\n".join(lines))
