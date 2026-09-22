@@ -343,3 +343,36 @@ def test_a_payload_without_a_ticket_id_is_rejected(api):
     r = api.post("/zendesk/hook", json={"hello": "world"},
                  headers={"Authorization": "Bearer hook-tok"})
     assert r.status_code == 422
+
+
+# --- which address tickets actually arrive on ----------------------------
+
+def test_inbound_addresses_are_summarised(tmp_path, monkeypatch, caplog):
+    """A test email that never became a ticket looks the same whether the
+    address is not connected to Zendesk or the mail just has not landed."""
+    import json as _json
+    import logging
+    from evogolf_support.api import app as app_module
+
+    path = tmp_path / "c.sqlite3"
+    with CorpusStore(path) as store:
+        for t in [
+            {"id": 1, "subject": "a", "created_at": "2026-01-01T00:00:00Z",
+             "recipient": "support@evolutiongolf.co.uk"},
+            {"id": 2, "subject": "b", "created_at": "2026-09-01T00:00:00Z",
+             "recipient": "Support@EvolutionGolf.co.uk"},
+            {"id": 3, "subject": "c", "created_at": "2026-05-01T00:00:00Z",
+             "recipient": "online@evolutiongolf.co.uk"},
+            {"id": 4, "subject": "d", "created_at": "2026-05-02T00:00:00Z"},
+        ]:
+            store.upsert_ticket(t)
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+
+    with caplog.at_level(logging.INFO):
+        app_module.log_inbound_addresses()
+    line = [r.getMessage() for r in caplog.records
+            if "channels/inbound_addresses" in r.getMessage()][0]
+    assert "support@evolutiongolf.co.uk" in line      # case folded together
+    assert "'tickets': 2" in line
+    assert "2026-09-01T00:00:00Z" in line             # most recent, not first
+    assert "online@evolutiongolf.co.uk" in line

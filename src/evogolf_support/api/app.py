@@ -117,6 +117,7 @@ def _run_export(**kwargs: Any) -> None:
         log.info("Export finished: %s", _export_state["last_result"])
         rebuild_search_index()
         log_quality_report()
+        log_inbound_addresses()
     except ConfigError as exc:
         # Expected before the Zendesk credentials are set - a stack trace here
         # would bury the one line that says what to do about it.
@@ -344,6 +345,38 @@ def log_quality_report() -> None:
         log.warning("Could not build the quality report: %s", exc)
 
 
+def log_inbound_addresses() -> None:
+    """Which addresses tickets actually arrive on, and how recently.
+
+    A test email that never became a ticket looks the same whether the
+    address is not connected to Zendesk at all or the mail simply has not
+    landed yet. The exported history settles it: whatever address customers
+    have been writing to for the past year is the one that works.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        seen: dict[str, dict[str, Any]] = {}
+        with CorpusStore(path) as store:
+            for row in store.tickets_raw():
+                try:
+                    ticket = json.loads(row["raw"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                to = (ticket.get("recipient") or "").strip().lower()
+                if not to:
+                    continue
+                entry = seen.setdefault(to, {"tickets": 0, "latest": ""})
+                entry["tickets"] += 1
+                created = ticket.get("created_at") or ""
+                if created > entry["latest"]:
+                    entry["latest"] = created
+        log.info("channels/inbound_addresses: %s", seen or "none recorded")
+    except Exception as exc:
+        log.warning("Could not summarise inbound addresses: %s", exc)
+
+
 def _saved_cursor() -> str | None:
     """The export cursor from a previous run, if there is one."""
     path = corpus_path()
@@ -390,6 +423,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     reclean_if_rules_changed()
     rebuild_search_index()
     log_quality_report()
+    log_inbound_addresses()
     log_requested_evidence()
     run_requested_evaluation()
     kick_off_first_export()

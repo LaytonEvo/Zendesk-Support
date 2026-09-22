@@ -189,6 +189,12 @@ class CorpusStore:
         ).fetchone()
         return row["value"] if row else None
 
+    def tickets_raw(self):
+        """Every ticket's stored Zendesk JSON, for one-off diagnostics."""
+        return self._conn.execute(
+            "SELECT id, raw FROM tickets WHERE raw IS NOT NULL ORDER BY id"
+        )
+
     def ticket_ids(self) -> list[int]:
         return [r["id"] for r in self._conn.execute("SELECT id FROM tickets ORDER BY id")]
 
