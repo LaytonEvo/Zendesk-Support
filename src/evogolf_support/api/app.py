@@ -474,21 +474,36 @@ def proactive_preview(
     if not supplied or not secrets.compare_digest(supplied, admin):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
 
-    from ..proactive.detect import TERMINAL_STATUSES, find_at_risk, status_summary
+    from ..proactive.detect import (
+        TERMINAL_STATUSES, fetch_orders, find_at_risk, summarise,
+    )
 
     try:
+        # One crawl of the shop, read twice: what would be flagged, and what
+        # was looked at. Showing only the first without the second is how a
+        # detector that never matches anything passes for a quiet week.
+        orders = fetch_orders()
+        summary = summarise(orders)
         at_risk = find_at_risk(
-            unfulfilled_days=unfulfilled_days, transit_days=transit_days
+            orders=orders,
+            unfulfilled_days=unfulfilled_days, transit_days=transit_days,
         )
-        statuses = status_summary()
     except Exception as exc:
         log.exception("Delay preview failed: %s", exc)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not read orders.")
 
-    status_line = ", ".join(f"{k} x{v}" for k, v in sorted(statuses.items())) or "none"
-    feed_works = bool(TERMINAL_STATUSES & set(statuses))
+    def _counts(d: dict[str, int]) -> str:
+        return ", ".join(f"{k} x{v}" for k, v in sorted(d.items())) or "none"
+
+    courier = summary.get("courier", {})
+    status_line = _counts(courier)
+    state_line = _counts(summary.get("fulfilment", {}))
+    scanned = summary.get("orders", 0)
+    undispatched = summary.get("no_fulfilment", 0)
+    window = f"{summary.get('oldest') or '?'} to {summary.get('newest') or '?'}"
+    feed_works = bool(TERMINAL_STATUSES & set(courier))
     feed_note = (
-        "" if feed_works or not statuses else
+        "" if feed_works or not courier else
         "Nothing reaches DELIVERED, so your courier is not feeding delivery status "
         "back into Shopify. The in-transit check is therefore switched off \u2014 it "
         "would flag every dispatched order. Undispatched orders and explicit courier "
@@ -526,8 +541,10 @@ created and no customer has been contacted.</p>
 <strong>{unfulfilled_days if unfulfilled_days is not None else 3}</strong> working days,
 in transit beyond <strong>{transit_days if transit_days is not None else 5}</strong>,
 plus any courier-reported failure. Weekends excluded.<br><br>
-Fulfilment statuses Shopify reports for this store:
-<strong>{html_escape(status_line)}</strong>. {html_escape(feed_note)}</div>
+Looked at <strong>{scanned}</strong> paid order(s), {html_escape(window)},
+of which <strong>{undispatched}</strong> have nothing dispatched at all.<br>
+Order states: <strong>{html_escape(state_line)}</strong>.<br>
+Courier statuses: <strong>{html_escape(status_line)}</strong>. {html_escape(feed_note)}</div>
 </div>"""
     return Response(body, media_type="text/html")
 

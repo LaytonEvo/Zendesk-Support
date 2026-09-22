@@ -26,6 +26,10 @@ log = logging.getLogger(__name__)
 UNFULFILLED_WORKING_DAYS = 3
 IN_TRANSIT_WORKING_DAYS = 5
 
+# Ceiling on how many orders one sweep reads, so a busy six weeks cannot
+# turn a routine check into an unbounded crawl of the order history.
+MAX_ORDERS_SCANNED = 1000
+
 # Fulfillment statuses split by who actually reported them.
 #
 # The distinction matters: several statuses only mean "we created the
@@ -46,8 +50,10 @@ SETTLED_STATUSES = {"DELIVERED", "PICKED_UP", "CANCELED", "LABEL_VOIDED",
 TERMINAL_STATUSES = {"DELIVERED", "PICKED_UP"}
 
 AT_RISK_QUERY = """
-query AtRiskOrders($query: String!, $first: Int!) {
-  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: false) {
+query AtRiskOrders($query: String!, $first: Int!, $after: String) {
+  orders(first: $first, after: $after, query: $query,
+         sortKey: CREATED_AT, reverse: true) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       id
       name
@@ -125,34 +131,105 @@ def _describe(order: dict[str, Any]) -> tuple[str, str, str]:
     return items, name, tracking
 
 
-def status_summary(limit: int = 100) -> dict[str, int]:
-    """What fulfilment statuses this store actually produces. Diagnostic."""
+def fetch_orders(limit: int = MAX_ORDERS_SCANNED, window_days: int = 45,
+                 page_size: int = 100) -> list[dict[str, Any]]:
+    """Every paid order in the window, newest first, following pagination.
+
+    One page was not enough. A single `first: 100` returned the *oldest*
+    hundred orders in six weeks, which at this shop's volume is a wall of
+    long-since-delivered history - and never the orders placed today that
+    have not gone out yet. That is why the undispatched check reported zero
+    even with its threshold at zero: the orders it exists to find were on a
+    page nobody asked for.
+
+    Newest first now, so if the cap is ever reached it drops the oldest
+    orders rather than the ones a customer is currently waiting on.
+    """
     if not shopify.configured():
-        return {}
-    now = dt.datetime.now(dt.timezone.utc)
-    since = (now - dt.timedelta(days=45)).date().isoformat()
-    try:
+        return []
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=window_days)).date()
+    search = f"created_at:>={since.isoformat()} AND financial_status:paid"
+
+    orders: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while len(orders) < limit:
+        want = min(page_size, limit - len(orders))
         data = shopify._post(  # noqa: SLF001
-            AT_RISK_QUERY,
-            {"query": f"created_at:>={since} AND financial_status:paid", "first": limit},
+            AT_RISK_QUERY, {"query": search, "first": want, "after": cursor}
         )
-    except Exception:
+        block = data.get("orders", {})
+        orders.extend(block.get("nodes", []))
+        if len(orders) >= limit:
+            # Enforce the ceiling here rather than trusting the page size we
+            # asked for to be the page size we get.
+            del orders[limit:]
+            break
+        info = block.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            break
+        cursor = info.get("endCursor")
+        if not cursor:
+            break
+    log.info("sweep/scanned %s paid order(s) from the last %s days",
+             len(orders), window_days)
+    return orders
+
+
+def status_summary(limit: int = MAX_ORDERS_SCANNED) -> dict[str, Any]:
+    """What this store's orders actually look like. Diagnostic only.
+
+    Reports the order-level fulfilment state as well as the courier
+    statuses. The courier counts alone could never answer the question that
+    mattered - whether any order has no fulfilment at all - because an order
+    with nothing dispatched contributes no courier rows to count.
+    """
+    try:
+        orders = fetch_orders(limit=limit)
+    except Exception as exc:
+        log.warning("Could not read orders for the status summary: %s", exc)
         return {}
-    counts: dict[str, int] = {}
-    for order in data.get("orders", {}).get("nodes", []):
-        for f in order.get("fulfillments") or []:
+    return summarise(orders)
+
+
+def summarise(orders: list[dict[str, Any]]) -> dict[str, Any]:
+    courier: dict[str, int] = {}
+    fulfilment: dict[str, int] = {}
+    undispatched = 0
+    dates = []
+    for order in orders:
+        state = (order.get("displayFulfillmentStatus") or "UNKNOWN").upper()
+        fulfilment[state] = fulfilment.get(state, 0) + 1
+        rows = order.get("fulfillments") or []
+        if not rows:
+            undispatched += 1
+        for f in rows:
             key = (f.get("displayStatus") or "UNKNOWN").upper()
-            counts[key] = counts.get(key, 0) + 1
-    return counts
+            courier[key] = courier.get(key, 0) + 1
+        when = _parse(order.get("createdAt"))
+        if when:
+            dates.append(when)
+    return {
+        "orders": len(orders),
+        "fulfilment": fulfilment,
+        "courier": courier,
+        "no_fulfilment": undispatched,
+        "oldest": min(dates).date().isoformat() if dates else "",
+        "newest": max(dates).date().isoformat() if dates else "",
+    }
 
 
 def find_at_risk(
     now: dt.datetime | None = None,
-    limit: int = 100,
+    limit: int = MAX_ORDERS_SCANNED,
     unfulfilled_days: int | None = None,
     transit_days: int | None = None,
+    orders: list[dict[str, Any]] | None = None,
 ) -> list[AtRisk]:
     """Orders that warrant an unprompted message.
+
+    A caller that has already fetched the orders can pass them in, so the
+    preview does not crawl the shop twice to show the findings and the
+    summary of what it looked at.
 
     The day thresholds can be overridden for a positive control: a detector
     that has never returned a result looks the same whether it is correct or
@@ -170,29 +247,23 @@ def find_at_risk(
         return []
 
     now = now or dt.datetime.now(dt.timezone.utc)
-    # Look back far enough to catch anything still open, but not the whole history.
-    since = (now - dt.timedelta(days=45)).date().isoformat()
-    search = f"created_at:>={since} AND financial_status:paid"
-
-    try:
-        data = shopify._post(AT_RISK_QUERY, {"query": search, "first": limit})  # noqa: SLF001
-    except Exception as exc:
-        log.warning("Could not read orders for the delay sweep: %s", exc)
-        return []
-
-    orders = data.get("orders", {}).get("nodes", [])
+    if orders is None:
+        try:
+            orders = fetch_orders(limit=limit)
+        except Exception as exc:
+            log.warning("Could not read orders for the delay sweep: %s", exc)
+            return []
 
     # Does the courier feed actually reach this store? If not a single
     # fulfillment in six weeks has reached a terminal status, nothing is
     # updating them, every dispatched order will eventually look overdue,
     # and "still in transit" means nothing here. Say so and do not use it.
-    statuses: dict[str, int] = {}
-    for order in orders:
-        for f in order.get("fulfillments") or []:
-            key = (f.get("displayStatus") or "UNKNOWN").upper()
-            statuses[key] = statuses.get(key, 0) + 1
+    summary = summarise(orders)
+    statuses = summary["courier"]
     transit_is_reliable = bool(TERMINAL_STATUSES & set(statuses))
-    log.info("sweep/fulfilment statuses seen: %s", statuses or "none")
+    log.info("sweep/order states: %s | courier: %s | no fulfilment: %s",
+             summary["fulfilment"] or "none", statuses or "none",
+             summary["no_fulfilment"])
     if not transit_is_reliable and statuses:
         log.warning(
             "No fulfilment has reached DELIVERED or PICKED_UP, so the courier "

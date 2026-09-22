@@ -386,3 +386,78 @@ def test_the_override_is_not_available_on_the_real_sweep():
     import inspect
     from evogolf_support.proactive.run import run_sweep
     assert set(inspect.signature(run_sweep).parameters) == {"dry_run"}
+
+
+# --- the "0 at threshold 0" regression -----------------------------------
+#
+# The undispatched check returned nothing even with its threshold at zero,
+# which cannot be true of a working day. It read one page of 100 orders,
+# oldest first, so at this shop's volume it only ever saw six-week-old
+# history and never today's orders - the only ones that can be undispatched.
+
+def _pages(monkeypatch, pages):
+    """Serve a list of pages, recording the cursor each request carried."""
+    seen: list[str | None] = []
+
+    def post(query, variables):
+        seen.append(variables.get("after"))
+        nodes = pages[len(seen) - 1]
+        more = len(seen) < len(pages)
+        return {"orders": {
+            "nodes": nodes,
+            "pageInfo": {"hasNextPage": more, "endCursor": f"cur{len(seen)}"},
+        }}
+
+    monkeypatch.setattr(detect.shopify, "configured", lambda: True)
+    monkeypatch.setattr(detect.shopify, "_post", post)
+    return seen
+
+
+def test_the_sweep_reads_past_the_first_page(monkeypatch):
+    now = MON + dt.timedelta(days=10)
+    page1 = [_fulfilled(f"#old{i}", MON, "DELIVERED") for i in range(3)]
+    page2 = [_order("#new", MON)]             # paid, never dispatched
+    seen = _pages(monkeypatch, [page1, page2])
+
+    found = detect.find_at_risk(now=now)
+
+    assert seen == [None, "cur1"]             # it followed the cursor
+    assert [f.order_name for f in found] == ["#new"]
+
+
+def test_orders_are_read_newest_first(monkeypatch):
+    """If the cap is ever hit it must drop old history, not today's orders."""
+    assert "reverse: true" in detect.AT_RISK_QUERY
+    assert "sortKey: CREATED_AT" in detect.AT_RISK_QUERY
+
+
+def test_the_scan_stops_at_the_ceiling(monkeypatch):
+    """A busy six weeks must not turn into an unbounded crawl."""
+    page = [_order(f"#{i}", MON) for i in range(10)]
+    seen = _pages(monkeypatch, [page] * 50)
+    orders = detect.fetch_orders(limit=25, page_size=10)
+    assert len(orders) == 25 and len(seen) == 3
+
+
+def test_the_summary_says_how_many_orders_have_nothing_dispatched(monkeypatch):
+    """Courier counts alone cannot answer that: an undispatched order has none."""
+    _pages(monkeypatch, [[
+        _fulfilled("#1", MON, "DELIVERED"),
+        _fulfilled("#2", MON, "FULFILLED"),
+        _order("#3", MON),
+    ]])
+    summary = detect.status_summary()
+    assert summary["orders"] == 3
+    assert summary["no_fulfilment"] == 1
+    assert summary["fulfilment"]["UNFULFILLED"] == 1
+    assert summary["courier"] == {"DELIVERED": 1, "FULFILLED": 1}
+
+
+def test_the_preview_shows_what_it_looked_at(client, monkeypatch):
+    """A page that only reports findings cannot distinguish quiet from broken."""
+    monkeypatch.setattr(detect.shopify, "configured", lambda: True)
+    monkeypatch.setattr(detect.shopify, "_post", lambda q, v: {"orders": {
+        "nodes": [_fulfilled("#1", MON, "DELIVERED"), _order("#2", MON)]}})
+    r = client.get("/proactive/preview", params={"token": "tok"})
+    assert "Looked at <strong>2</strong> paid order(s)" in r.text
+    assert "<strong>1</strong> have nothing dispatched at all" in r.text
