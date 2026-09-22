@@ -47,6 +47,7 @@ from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
 from .. import slack
 from ..zendesk import suggest
+from ..gmail import ingest as gmail_ingest, oauth as google_oauth
 
 log = logging.getLogger(__name__)
 
@@ -291,6 +292,14 @@ def log_integration_status() -> None:
         )
     else:
         log.warning("Ticket webhook: NOT configured - no drafts will be posted.")
+
+    if google_oauth.configured():
+        log.info("Gmail import: credentials set")
+    else:
+        log.info(
+            "Gmail import: not configured - the online@ history stays out of "
+            "the corpus. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+        )
 
     if slack.configured():
         log.info("Slack: configured - drafts and the delay digest will be posted")
@@ -677,6 +686,97 @@ def proactive_sweep(dry_run: bool = False) -> dict[str, int]:
 def reindex() -> dict[str, int]:
     with CorpusStore(corpus_path()) as store:
         return {"indexed": rebuild_index(store)}
+
+
+def _check_admin_query(request: Request, token: str) -> None:
+    """Admin check for an endpoint a browser must be able to open.
+
+    A browser cannot send an Authorization header from the address bar, so
+    the token is also accepted as a query parameter. That puts it in browser
+    history, which is why these responses carry Referrer-Policy: no-referrer
+    and why ADMIN_TOKEN should be rotated afterwards.
+    """
+    admin = _admin_token()
+    if not admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "ADMIN_TOKEN is not set, so this endpoint is disabled.",
+        )
+    header = request.headers.get("authorization", "")
+    supplied = token or (header[7:] if header.lower().startswith("bearer ") else "")
+    if not supplied or not secrets.compare_digest(supplied, admin):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
+
+
+@app.get("/google/install")
+def google_install(request: Request, token: str = "") -> RedirectResponse:
+    """Start the one-off authorisation of the online@ mailbox."""
+    _check_admin_query(request, token)
+    if not google_oauth.configured():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET first.",
+        )
+    redirect_uri = str(request.url_for("google_callback")).replace("http://", "https://")
+    log.info("Starting Google authorisation, redirecting to Google")
+    return RedirectResponse(
+        google_oauth.install_url(redirect_uri, google_oauth.new_nonce()),
+        headers={"Referrer-Policy": "no-referrer"},
+    )
+
+
+@app.get("/google/callback", name="google_callback")
+def google_callback(request: Request) -> Response:
+    """Google's redirect once the mailbox owner approves read access."""
+    params = dict(request.query_params)
+    if params.get("error"):
+        log.warning("Google authorisation was declined: %s", params["error"])
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Authorisation declined.")
+    if not google_oauth.consume_nonce(params.get("state", "")):
+        log.warning("Google callback rejected: unknown or reused state")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid request.")
+    code = params.get("code")
+    if not code:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid request.")
+
+    redirect_uri = str(request.url_for("google_callback")).replace("http://", "https://")
+    try:
+        payload = google_oauth.exchange_code(code, redirect_uri)
+    except Exception as exc:
+        log.exception("Google token exchange failed: %s", exc)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not reach Google.")
+
+    refresh = payload.get("refresh_token")
+    if not refresh:
+        # Google only returns one on first consent. Without it the import
+        # would work today and quietly stop when the access token expires.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Google returned no refresh token. Remove this app at "
+            "myaccount.google.com/permissions and authorise again.",
+        )
+    with CorpusStore(corpus_path()) as store:
+        google_oauth.store_refresh_token(store, refresh)
+    log.info("Gmail authorised - the online@ history can now be imported")
+    return Response(
+        "Gmail is connected, read-only. Now call /gmail/import to pull the "
+        "labelled customer history into the corpus.",
+        media_type="text/plain",
+        headers={"Referrer-Policy": "no-referrer"},
+    )
+
+
+@app.post("/gmail/import", dependencies=[Depends(require_admin)])
+def gmail_import(limit: int | None = None) -> dict[str, int]:
+    """Import the labelled online@ conversations into the corpus.
+
+    Safe to re-run: a conversation's id is derived from its Gmail thread, so
+    a second run updates rather than duplicates.
+    """
+    with CorpusStore(corpus_path()) as store:
+        result = gmail_ingest.import_threads(store, limit=limit)
+        rebuild_index(store)
+    return result
 
 
 @app.get("/shopify/install")

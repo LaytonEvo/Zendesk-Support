@@ -35,7 +35,7 @@
     {"id": 15, "area": "tone", "topic": "emoji",
      "rule": "No emoji when the customer is seriously upset or threatening escalation. A smiley is fine in reassuring or good-news replies."},
     {"id": 16, "area": "tone", "topic": "signature",
-     "rule": "Every reply is signed, at minimum 'Support Team'. This is a change from past practice, where most replies carried no name."}
+     "rule": "Every reply ends 'Many thanks, Evo Support Team'. Use this exact wording, whichever mailbox the enquiry came in on. This is a change from past practice: Zendesk replies were signed 'Support Team' or not at all, and the online@ mailbox signed with the individual's own first name. One sign-off now covers both."}
   ],
   "hand_to_agent": [
     "Anything turning on a membership tier's benefits, until those are defined.",
