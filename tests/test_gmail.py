@@ -197,3 +197,49 @@ def test_a_nested_multipart_body_is_found(store):
         ]},
     ]}
     assert "Buried but found" in ingest.message_text(payload)
+
+
+# --- the admin token must not reach the logs -----------------------------
+#
+# Found live: authorising Gmail wrote the full request line into Railway's
+# deploy log, admin token and all. Two endpoints have to accept the token in
+# the query string because a browser cannot send a header from the address
+# bar, so the redaction has to happen at the logger.
+
+def test_a_query_token_is_redacted_from_the_access_log():
+    import logging
+    from evogolf_support.api.app import _RedactQueryToken
+
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0,
+                               '%s - "%s %s HTTP/%s" %d', (
+                                   "100.64.0.1:15854", "GET",
+                                   "/google/install?token=B2z3s5id3s", "1.1", 307,
+                               ), None)
+    _RedactQueryToken().filter(record)
+    rendered = record.getMessage()
+    assert "B2z3s5id3s" not in rendered
+    assert "token=REDACTED" in rendered
+    assert "/google/install" in rendered          # the path itself still logs
+
+
+def test_redaction_survives_extra_query_parameters():
+    import logging
+    from evogolf_support.api.app import _RedactQueryToken
+
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0,
+                               "%s", ("/proactive/preview?token=abc123&unfulfilled_days=0",),
+                               None)
+    _RedactQueryToken().filter(record)
+    rendered = record.getMessage()
+    assert "abc123" not in rendered
+    assert "unfulfilled_days=0" in rendered      # other parameters are kept
+
+
+def test_redaction_also_covers_our_own_log_lines():
+    import logging
+    from evogolf_support.api.app import _RedactQueryToken
+
+    record = logging.LogRecord("x", logging.INFO, "", 0,
+                               "Opened https://host/google/install?token=secret99", (), None)
+    _RedactQueryToken().filter(record)
+    assert "secret99" not in record.getMessage()

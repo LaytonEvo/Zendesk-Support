@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 from contextlib import asynccontextmanager
@@ -45,6 +46,10 @@ from ..drafting.evaluate import run_evaluation
 from ..proactive.run import run_sweep
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
+
+# Set once the online@ history has been pulled in, so it is not re-imported
+# on every boot.
+GMAIL_IMPORTED_KEY = "gmail_history_imported"
 from .. import slack
 from ..zendesk import suggest
 from ..gmail import ingest as gmail_ingest, oauth as google_oauth
@@ -68,6 +73,28 @@ def configure_logging() -> None:
     # the progress lines that actually say how far along we are.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # Two endpoints have to take the admin token in the query string, because
+    # a browser cannot send a header from the address bar. Uvicorn's access
+    # log writes the full request line, so without this the token is printed
+    # in plain text into a log anyone with dashboard access can read - and
+    # into whatever ships those logs onward. Redact it at the source.
+    logging.getLogger("uvicorn.access").addFilter(_RedactQueryToken())
+
+
+class _RedactQueryToken(logging.Filter):
+    """Strip a `token=` query parameter out of anything logged."""
+
+    _PATTERN = re.compile(r"(token=)[^&\s\"']+", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._PATTERN.sub(r"\1REDACTED", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        if isinstance(record.msg, str):
+            record.msg = self._PATTERN.sub(r"\1REDACTED", record.msg)
+        return True
 
 # Guards against a second export starting while one is already running.
 _export_lock = threading.Lock()
@@ -348,6 +375,42 @@ def run_requested_evaluation() -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
+def kick_off_gmail_import() -> None:
+    """Import the online@ history once, on the first boot after authorising.
+
+    A POST is unreachable from a browser and this account is run from one, so
+    the import runs itself rather than waiting to be called. It is keyed on a
+    stored marker, not on the corpus being empty: a run interrupted halfway
+    would otherwise never resume.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            if not google_oauth.authorised(store):
+                return
+            if store.get_state(GMAIL_IMPORTED_KEY):
+                log.info("Gmail history already imported; skipping")
+                return
+    except Exception as exc:
+        log.warning("Could not check the Gmail import state: %s", exc)
+        return
+
+    def worker() -> None:
+        try:
+            with CorpusStore(corpus_path()) as store:
+                result = gmail_ingest.import_threads(store)
+                store.set_state(GMAIL_IMPORTED_KEY, json.dumps(result))
+                rebuild_index(store)
+            log.info("Gmail import finished: %s", result)
+        except Exception as exc:
+            log.warning("Gmail import failed: %s", exc)
+
+    log.info("Importing the online@ history into the corpus")
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def log_quality_report() -> None:
     """Log corpus coverage and cleaning stats - counts only, no content."""
     try:
@@ -445,6 +508,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     log_requested_evidence()
     run_requested_evaluation()
     kick_off_first_export()
+    kick_off_gmail_import()
     kick_off_discovery()
     yield
 
