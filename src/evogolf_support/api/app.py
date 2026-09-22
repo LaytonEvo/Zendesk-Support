@@ -22,7 +22,9 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import (
+    BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, status,
+)
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from html import escape as html_escape
@@ -43,6 +45,7 @@ from ..drafting.evaluate import run_evaluation
 from ..proactive.run import run_sweep
 from ..corpus.store import CorpusStore
 from ..zendesk.export import CURSOR_KEY
+from ..zendesk import suggest
 
 log = logging.getLogger(__name__)
 
@@ -276,6 +279,17 @@ def log_integration_status() -> None:
             "SHOPIFY_CLIENT_SECRET (or a legacy SHOPIFY_ACCESS_TOKEN)."
         )
 
+    if os.environ.get("ZENDESK_WEBHOOK_TOKEN", "").strip():
+        log.info("Ticket webhook: configured - drafts will post as internal notes")
+    elif _admin_token():
+        log.warning(
+            "Ticket webhook: falling back to ADMIN_TOKEN. Set "
+            "ZENDESK_WEBHOOK_TOKEN to its own value so the token typed into "
+            "Zendesk does not also unlock /export and /reindex."
+        )
+    else:
+        log.warning("Ticket webhook: NOT configured - no drafts will be posted.")
+
 
 def rebuild_search_index() -> None:
     """Keep retrieval in step with the corpus. Cheap - no API calls."""
@@ -448,6 +462,55 @@ def draft(req: DraftRequest) -> Draft:
             theme=req.theme,
             order_context=order_context,
         )
+
+
+class TicketHook(BaseModel):
+    """What the Zendesk trigger sends. Only the id is needed.
+
+    The trigger's placeholder is {{ticket.id}}, which Zendesk renders as a
+    string, so the field is parsed permissively rather than requiring an int.
+    """
+
+    ticket_id: int
+
+
+@app.post("/zendesk/hook", status_code=status.HTTP_202_ACCEPTED)
+def zendesk_hook(
+    hook: TicketHook, tasks: BackgroundTasks, request: Request,
+) -> dict[str, str]:
+    """Draft a reply for a ticket and leave it as an internal note.
+
+    Answers immediately and works in the background. Drafting takes longer
+    than Zendesk is willing to wait for a webhook, and a timeout there means
+    a retry - which would draft the same ticket twice.
+    """
+    expected = suggest.webhook_token()
+    if not expected:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "ZENDESK_WEBHOOK_TOKEN is not set, so this endpoint is disabled.",
+        )
+    header = request.headers.get("authorization", "")
+    supplied = header[7:] if header.lower().startswith("bearer ") else ""
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook token.")
+
+    tasks.add_task(_run_suggestion, hook.ticket_id)
+    return {"status": "accepted"}
+
+
+def _run_suggestion(ticket_id: int) -> None:
+    """Background half of the webhook. Nothing here may raise.
+
+    An unhandled exception in a background task is invisible: the webhook has
+    already answered 202 and Zendesk will never retry it, so a failure that
+    is not logged is a ticket that silently never gets a draft.
+    """
+    try:
+        outcome = suggest.suggest_for_ticket(ticket_id, corpus_path())
+        log.info("hook/ticket %s: %s", ticket_id, outcome)
+    except Exception as exc:                            # noqa: BLE001
+        log.exception("hook/ticket %s failed: %s", ticket_id, exc)
 
 
 @app.get("/proactive/preview")

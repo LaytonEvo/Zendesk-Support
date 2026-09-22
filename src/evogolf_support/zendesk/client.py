@@ -113,8 +113,47 @@ class ZendeskClient:
 
         raise ZendeskError(f"Gave up on POST {path} after {MAX_RETRIES} retries")
 
+    def put(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """PUT to Zendesk, retrying on 429 and transient 5xx."""
+        for attempt in range(MAX_RETRIES):
+            response = self._client.put(path, json=payload)
+
+            if response.status_code == 429:
+                wait = _retry_after(response, DEFAULT_BACKOFF_SECONDS)
+                log.warning("Rate limited on PUT %s; sleeping %.0fs", path, wait)
+                time.sleep(wait)
+                continue
+            if response.status_code >= 500:
+                time.sleep(2.0 ** attempt)
+                continue
+            if response.status_code == 404:
+                raise ZendeskNotFound(f"Zendesk 404 on PUT {path}")
+            if response.status_code >= 400:
+                raise ZendeskError(
+                    f"Zendesk {response.status_code} on PUT {path}: "
+                    f"{response.text[:400]}"
+                )
+            return response.json()
+
+        raise ZendeskError(f"Gave up on PUT {path} after {MAX_RETRIES} retries")
+
     def create_ticket(self, ticket: dict[str, Any]) -> dict[str, Any]:
         return self.post("/tickets.json", {"ticket": ticket}).get("ticket", {})
+
+    def ticket(self, ticket_id: int) -> dict[str, Any]:
+        return self.get(f"/tickets/{ticket_id}.json").get("ticket", {})
+
+    def add_internal_note(self, ticket_id: int, body: str) -> dict[str, Any]:
+        """Append a private comment. public=False is what keeps it internal.
+
+        Zendesk defaults a comment to public when the field is omitted, so it
+        is always sent explicitly: the difference between an internal note and
+        an unreviewed reply landing in a customer's inbox is this one flag.
+        """
+        return self.put(
+            f"/tickets/{ticket_id}.json",
+            {"ticket": {"comment": {"body": body, "public": False}}},
+        ).get("ticket", {})
 
     def verify(self) -> dict[str, Any]:
         """Confirm credentials work and report who we are authenticated as."""
