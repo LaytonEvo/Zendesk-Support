@@ -581,7 +581,7 @@ def proactive_preview(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
 
     from ..proactive.detect import (
-        TERMINAL_STATUSES, fetch_orders, find_at_risk, summarise,
+        fetch_orders, find_at_risk, summarise,
     )
 
     try:
@@ -607,13 +607,19 @@ def proactive_preview(
     scanned = summary.get("orders", 0)
     undispatched = summary.get("no_fulfilment", 0)
     window = f"{summary.get('oldest') or '?'} to {summary.get('newest') or '?'}"
-    feed_works = bool(TERMINAL_STATUSES & set(courier))
+    carriers = summary.get("carriers", {})
+    blind = summary.get("blind_carriers", [])
+    carrier_line = ", ".join(
+        f"{name} {c['confirmed']}/{c['shipped']} confirmed delivered"
+        for name, c in sorted(carriers.items())
+    ) or "none"
     feed_note = (
-        "" if feed_works or not courier else
-        "Nothing reaches DELIVERED, so your courier is not feeding delivery status "
-        "back into Shopify. The in-transit check is therefore switched off \u2014 it "
-        "would flag every dispatched order. Undispatched orders and explicit courier "
-        "failures are still checked."
+        "" if not blind else
+        "No delivery confirmation has ever arrived from " + ", ".join(blind)
+        + ". Parcels sent this way cannot be checked for slow delivery at all "
+        "\u2014 a lost one looks exactly like a delivered one. Only a customer "
+        "writing in will surface those. Carriers that do confirm are still "
+        "checked, as are undispatched orders and reported failures."
     )
 
     rows = "".join(
@@ -650,7 +656,9 @@ plus any courier-reported failure. Weekends excluded.<br><br>
 Looked at <strong>{scanned}</strong> paid order(s), {html_escape(window)},
 of which <strong>{undispatched}</strong> have nothing dispatched at all.<br>
 Order states: <strong>{html_escape(state_line)}</strong>.<br>
-Courier statuses: <strong>{html_escape(status_line)}</strong>. {html_escape(feed_note)}</div>
+Courier statuses: <strong>{html_escape(status_line)}</strong>.<br>
+By carrier: <strong>{html_escape(carrier_line)}</strong>.<br>
+{html_escape(feed_note)}</div>
 </div>"""
     return Response(body, media_type="text/html")
 

@@ -65,22 +65,62 @@ def test_delivered_orders_are_never_flagged(monkeypatch):
     assert _run_detect(monkeypatch, orders, now) == []
 
 
+def _shipped(name, created, status, carrier, number="123"):
+    return _order(name, created, "FULFILLED", [
+        {"createdAt": created.isoformat().replace("+00:00", "Z"),
+         "displayStatus": status,
+         "trackingInfo": [{"company": carrier, "number": number}]}])
+
+
 def test_in_transit_beyond_five_working_days_is_flagged(monkeypatch):
-    """Needs a delivered order in the window to prove the courier feed works."""
+    """Needs a delivered parcel from the same carrier to prove its feed works."""
     now = MON + dt.timedelta(days=9)   # 7 working days
     orders = [
-        _order("#0", MON, "FULFILLED", [
-            {"createdAt": MON.isoformat().replace("+00:00", "Z"),
-             "displayStatus": "DELIVERED", "trackingInfo": []}]),
-        _order("#1", MON, "FULFILLED", [
-            {"createdAt": MON.isoformat().replace("+00:00", "Z"),
-             "displayStatus": "IN_TRANSIT",
-             "trackingInfo": [{"company": "DPD", "number": "123"}]}]),
+        _shipped("#0", MON, "DELIVERED", "DPD", "111"),
+        _shipped("#1", MON, "IN_TRANSIT", "DPD", "123"),
     ]
     found = _run_detect(monkeypatch, orders, now)
     assert [f.reason for f in found] == ["stuck_in_transit"]
     assert found[0].order_name == "#1"
     assert found[0].tracking == "DPD 123"
+
+
+# --- one carrier reports back, another does not --------------------------
+#
+# The real shape of this shop. Royal Mail fulfilments reach DELIVERED; DPD
+# ones sit at FULFILLED forever. A single verdict for the whole shop is
+# wrong either way - it either runs a clock against parcels nothing updates,
+# or discards the one carrier that does report.
+
+def test_a_carrier_is_only_trusted_on_its_own_evidence(monkeypatch):
+    now = MON + dt.timedelta(days=9)
+    orders = [
+        _shipped("#rm-done", MON, "DELIVERED", "Royal Mail", "RM1"),
+        _shipped("#rm-late", MON, "IN_TRANSIT", "Royal Mail", "RM2"),
+        _shipped("#dpd-late", MON, "IN_TRANSIT", "DPD Local", "DPD1"),
+    ]
+    found = _run_detect(monkeypatch, orders, now)
+    # Royal Mail proves its own feed. DPD has never confirmed anything, so
+    # its clock means nothing and the order is not flagged on it.
+    assert [f.order_name for f in found] == ["#rm-late"]
+
+
+def test_the_carriers_we_are_blind_to_are_named(monkeypatch):
+    orders = [
+        _shipped("#1", MON, "DELIVERED", "Royal Mail"),
+        _shipped("#2", MON, "FULFILLED", "DPD Local"),
+        _shipped("#3", MON, "FULFILLED", "DPD Local"),
+    ]
+    summary = detect.summarise(orders)
+    assert summary["blind_carriers"] == ["DPD Local"]
+    assert summary["carriers"]["DPD Local"] == {"shipped": 2, "confirmed": 0}
+    assert summary["carriers"]["Royal Mail"] == {"shipped": 1, "confirmed": 1}
+
+
+def test_a_fulfilment_with_no_tracking_is_not_called_a_blind_carrier(monkeypatch):
+    """Nothing was handed to a carrier, so there is no feed to be missing."""
+    orders = [_fulfilled("#1", MON, "MARKED_AS_FULFILLED")]
+    assert detect.summarise(orders)["blind_carriers"] == []
 
 
 def test_in_transit_within_the_window_is_left_alone(monkeypatch):

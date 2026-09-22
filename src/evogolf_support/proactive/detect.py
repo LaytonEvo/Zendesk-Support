@@ -191,9 +191,21 @@ def status_summary(limit: int = MAX_ORDERS_SCANNED) -> dict[str, Any]:
     return summarise(orders)
 
 
+def _carrier_of(fulfilment: dict[str, Any]) -> str:
+    for t in fulfilment.get("trackingInfo") or []:
+        company = (t.get("company") or "").strip()
+        if company:
+            # Some shipping rates are named after the service sold rather
+            # than the carrier ("Free Delivery on Orders 50 or Over"). The
+            # first few words are enough to tell them apart in a report.
+            return company[:40]
+    return "no tracking"
+
+
 def summarise(orders: list[dict[str, Any]]) -> dict[str, Any]:
     courier: dict[str, int] = {}
     fulfilment: dict[str, int] = {}
+    carriers: dict[str, dict[str, int]] = {}
     undispatched = 0
     dates = []
     for order in orders:
@@ -205,6 +217,10 @@ def summarise(orders: list[dict[str, Any]]) -> dict[str, Any]:
         for f in rows:
             key = (f.get("displayStatus") or "UNKNOWN").upper()
             courier[key] = courier.get(key, 0) + 1
+            entry = carriers.setdefault(_carrier_of(f), {"shipped": 0, "confirmed": 0})
+            entry["shipped"] += 1
+            if key in TERMINAL_STATUSES:
+                entry["confirmed"] += 1
         when = _parse(order.get("createdAt"))
         if when:
             dates.append(when)
@@ -212,6 +228,11 @@ def summarise(orders: list[dict[str, Any]]) -> dict[str, Any]:
         "orders": len(orders),
         "fulfilment": fulfilment,
         "courier": courier,
+        "carriers": carriers,
+        "blind_carriers": sorted(
+            name for name, c in carriers.items()
+            if c["confirmed"] == 0 and name != "no tracking"
+        ),
         "no_fulfilment": undispatched,
         "oldest": min(dates).date().isoformat() if dates else "",
         "newest": max(dates).date().isoformat() if dates else "",
@@ -260,10 +281,26 @@ def find_at_risk(
     # and "still in transit" means nothing here. Say so and do not use it.
     summary = summarise(orders)
     statuses = summary["courier"]
-    transit_is_reliable = bool(TERMINAL_STATUSES & set(statuses))
+    # Reliability is per carrier, not per shop. Royal Mail reports back and
+    # DPD does not, and a single verdict for the whole shop is wrong either
+    # way: it either trusts a clock against parcels nothing ever updates, or
+    # throws away the one carrier that does report.
+    reliable_carriers = {
+        name for name, c in summary["carriers"].items() if c["confirmed"] > 0
+    }
+    transit_is_reliable = bool(reliable_carriers)
     log.info("sweep/order states: %s | courier: %s | no fulfilment: %s",
              summary["fulfilment"] or "none", statuses or "none",
              summary["no_fulfilment"])
+    log.info("sweep/carriers: %s", summary["carriers"] or "none")
+    if summary["blind_carriers"]:
+        log.warning(
+            "No delivery confirmation has ever arrived from: %s. Parcels sent "
+            "by these carriers cannot be checked for slow delivery at all - "
+            "they look identical whether delivered yesterday or lost a month "
+            "ago. Only a customer writing in will surface those.",
+            ", ".join(summary["blind_carriers"]),
+        )
     if not transit_is_reliable and statuses:
         log.warning(
             "No fulfilment has reached DELIVERED or PICKED_UP, so the courier "
@@ -313,7 +350,7 @@ def find_at_risk(
                 # "We dispatched it" - no courier information, nothing to judge.
                 break
             if status in MOVING_STATUSES:
-                if not transit_is_reliable:
+                if _carrier_of(f) not in reliable_carriers:
                     break
                 shipped = _parse(f.get("createdAt")) or created
                 age = working_days_between(shipped, now)
