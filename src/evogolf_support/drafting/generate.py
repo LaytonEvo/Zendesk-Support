@@ -123,6 +123,10 @@ delivery-charge refund or any gesture, unless the ticket or the order data \
 actually shows it. If the cause is unknown, say what you are going to check. \
 A customer disputing a delivery timescale may simply have bought the standard \
 service - do not apologise for an error until one is established.
+- Keep it as short as the team writes. Their replies average four or five \
+lines: greeting, what you found, what happens next, sign-off. Say the thing \
+and stop. Do not explain what you have decided not to do, and do not \
+pre-empt a request the customer has not made.
 - Write plain text only. Use the character GBP-sign directly for money \
 (for example 36.99 written with a pound sign in front). Never use LaTeX, \
 markdown escapes, backslashes or HTML entities. Separate sentences with full \

@@ -312,3 +312,72 @@ def test_name_is_not_used_when_email_already_matched(monkeypatch):
                         lambda **kw: pytest.fail("name lookup should not run"))
     assert "#9" in shopify.context_for_ticket("no order number here",
                                               email="a@b.c", name="Jayman Patel")
+
+
+# --- a quoted order reference is not proof of ownership -------------------
+#
+# Found on the first live ticket. A test email quoted order #29588, which
+# belonged to a different customer entirely. The draft came back naming
+# their product, their tracking number and their dispatch date, addressed
+# to the person who had written in. An agent who trusted the draft would
+# have disclosed one customer's order to another.
+
+def _order(name="#29588", email="les@example.com", first="Les", last="Perry"):
+    return {"name": name, "email": email, "createdAt": "2026-09-21T09:00:00Z",
+            "displayFinancialStatus": "PAID",
+            "displayFulfillmentStatus": "FULFILLED",
+            "currentTotalPriceSet": None,
+            "customer": {"firstName": first, "lastName": last},
+            "lineItems": {"nodes": [{"title": "Motocaddy M7", "quantity": 1}]},
+            "fulfillments": [{"createdAt": "2026-09-21T15:00:00Z", "status": "SUCCESS",
+                              "trackingInfo": [{"company": "DPD",
+                                                "number": "6979957897"}]}],
+            "refunds": [], "returns": {"nodes": []}}
+
+
+def _by_reference(monkeypatch, order):
+    _creds(monkeypatch)
+    monkeypatch.setattr(shopify, "find_orders",
+                        lambda **kw: [order] if kw.get("reference") else [])
+    monkeypatch.setattr(shopify, "find_customer_id", lambda **kw: None)
+
+
+def test_another_customers_order_is_never_described(monkeypatch):
+    _by_reference(monkeypatch, _order())
+    out = shopify.context_for_ticket("where is order 29588",
+                                     email="layton@example.com", name="Layton Brooks")
+    assert "6979957897" not in out          # their tracking number
+    assert "Motocaddy" not in out           # their product
+    assert "2026-09-21" not in out          # their dates
+    assert "Les" not in out and "Perry" not in out
+    assert "29588" in out                   # the quoted reference itself is fine
+    assert "confirm the order number" in out
+
+
+def test_the_customers_own_order_still_comes_through(monkeypatch):
+    _by_reference(monkeypatch, _order(email="layton@example.com"))
+    out = shopify.context_for_ticket("where is order 29588",
+                                     email="Layton@Example.com", name="Layton Brooks")
+    assert "6979957897" in out and "Motocaddy" in out
+
+
+def test_a_name_match_is_accepted_when_no_email_is_known(monkeypatch):
+    _by_reference(monkeypatch, _order(email=""))
+    out = shopify.context_for_ticket("where is order 29588",
+                                     email=None, name="les perry")
+    assert "6979957897" in out
+
+
+def test_an_unidentified_requester_gets_nothing(monkeypatch):
+    """No email and no name means ownership cannot be established at all."""
+    _by_reference(monkeypatch, _order())
+    out = shopify.context_for_ticket("where is order 29588", email=None, name=None)
+    assert "6979957897" not in out
+
+
+def test_email_beats_a_matching_name(monkeypatch):
+    """Two customers share a name far more often than an address."""
+    _by_reference(monkeypatch, _order(email="someone.else@example.com"))
+    out = shopify.context_for_ticket("where is order 29588",
+                                     email="les@example.com", name="Les Perry")
+    assert "6979957897" not in out

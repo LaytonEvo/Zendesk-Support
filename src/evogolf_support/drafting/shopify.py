@@ -32,6 +32,7 @@ query SupportOrderLookup($query: String!, $first: Int!) {
   orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
     nodes {
       name
+      email
       createdAt
       cancelledAt
       displayFulfillmentStatus
@@ -373,9 +374,28 @@ def context_for_ticket(
 
     for ref in order_references(text):
         orders = find_orders(reference=ref)
-        if orders:
-            log.info("Matched order by reference %s", ref)
-            return format_for_prompt(orders)
+        if not orders:
+            continue
+        if not belongs_to(orders[0], email=email, name=name):
+            # A reference quoted in a ticket is not proof of ownership. The
+            # number may be mistyped, forwarded, or copied from someone
+            # else's confirmation email, and the details behind it are
+            # another customer's: their items, their address, their
+            # tracking number. Say that a reference was quoted and nothing
+            # more, so the draft cannot repeat any of it back.
+            log.warning(
+                "Order reference %s does not belong to this requester - "
+                "withholding its details from the draft", ref
+            )
+            return (
+                f"A customer quoted order reference {ref}, but that order is "
+                "not under this person's email or name. Do NOT repeat any "
+                "detail of it - no items, dates, tracking or addresses. Ask "
+                "them to confirm the order number from their confirmation "
+                "email, and say nothing about what that reference points to."
+            )
+        log.info("Matched order by reference %s", ref)
+        return format_for_prompt(orders)
 
     if email:
         orders = find_orders(email=email, limit=3)
@@ -393,6 +413,29 @@ def context_for_ticket(
                 return format_for_prompt(orders)
 
     return ""
+
+
+def belongs_to(order: dict[str, Any], *, email: str | None,
+               name: str | None) -> bool:
+    """Does this order plausibly belong to the person who wrote in?
+
+    Email is the test that counts. A name is accepted only when no email is
+    known, because two customers share a name far more often than an
+    address. When neither is known we cannot tell, and an unverified order
+    is treated as someone else's.
+    """
+    order_email = (order.get("email") or "").strip().lower()
+    if email and email.strip():
+        return order_email == email.strip().lower()
+
+    first, last = split_name(name)
+    if not (first or last):
+        return False
+    who = order.get("customer") or {}
+    return (
+        (who.get("firstName") or "").strip().lower() == (first or "").strip().lower()
+        and (who.get("lastName") or "").strip().lower() == (last or "").strip().lower()
+    )
 
 
 def split_name(name: str | None) -> tuple[str | None, str | None]:
