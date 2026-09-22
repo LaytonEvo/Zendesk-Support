@@ -150,18 +150,31 @@ def suggest_for_ticket(ticket_id: int, corpus: Any) -> str:
         comments = client.ticket_comments(ticket_id)
         if not comments:
             return "no comments"
-        latest = comments[-1]
 
-        # The loop guard. Our own note is private and authored by the API
-        # user, so either test alone would stop it; both are here because a
-        # runaway that writes to customer tickets is not worth one test.
-        if not latest.get("public", True):
-            return "latest comment is internal - nothing new from the customer"
+        # Draft for the customer's most recent message, not for whatever
+        # happens to be last in the thread.
+        #
+        # Reading comments[-1] and requiring it to be the requester's looked
+        # like the tighter test and was in fact the weaker one. This account
+        # runs an auto-acknowledgement trigger, which posts a public reply
+        # within seconds of a ticket arriving - so by the time this handler
+        # reads the thread, the customer's message is usually no longer last.
+        # Every new email ticket would have been skipped, and skipped
+        # silently, with a log line that read like a correct decision.
         me = api_user_id(client)
-        if me and latest.get("author_id") == me:
-            return "latest comment is our own"
-        if latest.get("author_id") != ticket.get("requester_id"):
-            return "latest comment is not from the requester"
+        requester = ticket.get("requester_id")
+        mine = [c for c in comments
+                if c.get("author_id") == requester and c.get("public", True)]
+        if not mine:
+            return "nothing from the requester to reply to"
+        latest = mine[-1]
+
+        # Have we already answered this message? The stored record below is
+        # the usual answer, but the thread itself carries the same fact and
+        # survives the corpus database being rebuilt, so it is asked first.
+        after = comments[comments.index(latest) + 1:]
+        if me and any(c.get("author_id") == me for c in after):
+            return "already noted on this message"
 
         comment_id = int(latest.get("id") or 0)
         with CorpusStore(corpus) as store:

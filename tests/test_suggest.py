@@ -117,12 +117,16 @@ def test_the_customer_message_and_order_reach_the_draft(monkeypatch, corpus, wir
 # --- the loop guards ------------------------------------------------------
 
 def test_our_own_note_does_not_produce_another(monkeypatch, corpus, wired):
-    """Without this the webhook answers itself, forever."""
+    """Without this the webhook answers itself, forever.
+
+    Read from the thread rather than from stored state, so it still holds if
+    the corpus database is ever rebuilt from scratch.
+    """
     client = _install(monkeypatch, FakeClient(
         [_comment(1, CUSTOMER_ID), _comment(2, API_USER_ID, public=False)]))
     outcome = suggest.suggest_for_ticket(5, corpus)
     assert client.notes == []
-    assert "internal" in outcome
+    assert outcome == "already noted on this message"
 
 
 def test_a_public_comment_from_us_does_not_produce_a_note(monkeypatch, corpus, wired):
@@ -133,11 +137,36 @@ def test_a_public_comment_from_us_does_not_produce_a_note(monkeypatch, corpus, w
     assert client.notes == []
 
 
-def test_an_agent_reply_does_not_produce_a_note(monkeypatch, corpus, wired):
-    """An agent has answered; a suggestion after the fact is noise."""
-    client = _install(monkeypatch, FakeClient(
-        [_comment(1, CUSTOMER_ID), _comment(2, AGENT_ID)]))
+def test_an_auto_acknowledgement_does_not_suppress_the_draft(monkeypatch, corpus, wired):
+    """This account auto-acknowledges every new email ticket within seconds.
+
+    That reply is public and agent-authored, so by the time this handler
+    reads the thread the customer's message is no longer last. Requiring the
+    last comment to be the customer's would have skipped every new email
+    ticket - silently, with a log line that read like a correct decision.
+    """
+    client = _install(monkeypatch, FakeClient([
+        _comment(1, CUSTOMER_ID),
+        _comment(2, AGENT_ID, body="Thanks, we have received your message."),
+    ]))
+    assert suggest.suggest_for_ticket(5, corpus) == "suggested"
+    assert len(client.notes) == 1
+
+
+def test_the_draft_answers_the_customer_not_the_acknowledgement(monkeypatch, corpus, wired):
+    client = _install(monkeypatch, FakeClient([
+        _comment(1, CUSTOMER_ID, body="Where is my trolley?"),
+        _comment(2, AGENT_ID, body="Thanks, we have received your message."),
+    ]))
     suggest.suggest_for_ticket(5, corpus)
+    assert wired[0]["body"] == "Where is my trolley?"
+
+
+def test_an_internal_note_from_an_agent_is_not_replied_to(monkeypatch, corpus, wired):
+    """A colleague's private aside is not a customer message."""
+    client = _install(monkeypatch, FakeClient(
+        [_comment(1, AGENT_ID, public=False, body="Chasing DPD on this one.")]))
+    assert suggest.suggest_for_ticket(5, corpus) == "nothing from the requester to reply to"
     assert client.notes == []
 
 
