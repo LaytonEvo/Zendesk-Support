@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -54,6 +55,8 @@ GMAIL_IMPORTED_KEY = "gmail_history_imported"
 from .. import slack
 from ..zendesk import suggest
 from ..gmail import ingest as gmail_ingest, oauth as google_oauth
+from .. import metrics
+from . import dashboard
 
 log = logging.getLogger(__name__)
 
@@ -426,6 +429,32 @@ def catch_up_suggestions() -> None:
     log.info("catch-up: %s ticket(s) drafted that had been missed", drafted)
 
 
+# How often the corpus is refreshed from Zendesk. Without this the dashboard
+# would only be as current as the last deploy, which is the kind of stale
+# number people stop trusting and then stop looking at.
+REFRESH_MINUTES = 30
+
+
+def start_periodic_refresh() -> None:
+    """Keep the corpus - and so the dashboard - current between deploys.
+
+    The export is cursor-based and incremental, so a run with nothing new
+    costs one API call. Failures are logged and the loop continues: a
+    Zendesk outage should pause the numbers, not stop them updating for
+    good once it is over.
+    """
+    def loop() -> None:
+        while True:
+            time.sleep(REFRESH_MINUTES * 60)
+            try:
+                _run_export(resume=True)
+            except Exception as exc:                    # noqa: BLE001
+                log.warning("Periodic refresh failed: %s", exc)
+
+    threading.Thread(target=loop, daemon=True).start()
+    log.info("Corpus will refresh from Zendesk every %s minutes", REFRESH_MINUTES)
+
+
 def kick_off_gmail_import() -> None:
     """Import the online@ history once, on the first boot after authorising.
 
@@ -561,6 +590,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     kick_off_first_export()
     kick_off_gmail_import()
     kick_off_discovery()
+    start_periodic_refresh()
     yield
 
 
@@ -821,6 +851,44 @@ def _check_admin_query(request: Request, token: str) -> None:
     supplied = token or (header[7:] if header.lower().startswith("bearer ") else "")
     if not supplied or not secrets.compare_digest(supplied, admin):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
+
+
+def _dashboard_token() -> str:
+    """Its own token, so the dashboard can be shared without handing over the
+    keys. ADMIN_TOKEN would also unlock export, reindex and the sweep."""
+    return (os.environ.get("DASHBOARD_TOKEN", "").strip()
+            or _admin_token())
+
+
+@app.get("/dashboard")
+def admin_dashboard(request: Request, token: str = "", days: int = 30) -> Response:
+    """Read-only view of whether Zendesk is used and the drafts relied on."""
+    expected = _dashboard_token()
+    if not expected:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Neither DASHBOARD_TOKEN nor ADMIN_TOKEN is set.",
+        )
+    header = request.headers.get("authorization", "")
+    supplied = token or (header[7:] if header.lower().startswith("bearer ") else "")
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token.")
+
+    days = max(1, min(int(days), 365))
+    path = corpus_path()
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
+    try:
+        with CorpusStore(path) as store:
+            report = metrics.report(store, days)
+    except Exception as exc:
+        log.exception("Dashboard failed: %s", exc)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not build the report.")
+    return Response(
+        dashboard.render(report, days),
+        media_type="text/html",
+        headers={"Referrer-Policy": "no-referrer"},
+    )
 
 
 @app.get("/google/install")

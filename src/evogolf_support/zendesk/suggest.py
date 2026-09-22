@@ -202,6 +202,11 @@ def suggest_for_ticket(ticket_id: int, corpus: Any) -> str:
             )
             client.add_internal_note(ticket_id, format_note(draft))
             _record_suggested(store, ticket_id, comment_id)
+            store.record_draft(
+                ticket_id, comment_id,
+                dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                draft.draft, draft.confidence, draft.hand_to_agent,
+            )
 
     # After the note, never instead of it. Slack is where someone reads
     # this; the ticket is where it has to be. If Slack fails, the draft is

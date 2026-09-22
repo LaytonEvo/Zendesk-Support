@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS ticket_themes (
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_themes_key ON ticket_themes(theme_key);
 
+CREATE TABLE IF NOT EXISTS drafts (
+    ticket_id   INTEGER NOT NULL,
+    comment_id  INTEGER NOT NULL,
+    created_at  TEXT,
+    draft       TEXT,
+    confidence  TEXT,
+    handover    INTEGER,
+    PRIMARY KEY (ticket_id, comment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_created ON drafts(created_at);
+
 CREATE TABLE IF NOT EXISTS export_state (
     key     TEXT PRIMARY KEY,
     value   TEXT
@@ -172,6 +183,33 @@ class CorpusStore:
                 """,
                 [(u.get("id"), u.get("name"), u.get("email"), u.get("role")) for u in users],
             )
+
+    def record_draft(self, ticket_id: int, comment_id: int, created_at: str,
+                     draft: str, confidence: str, handover: bool) -> None:
+        """Keep what was suggested, so it can later be compared with what the
+        agent actually sent. Without this there is no way to tell whether the
+        drafts are used or quietly ignored."""
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO drafts
+                    (ticket_id, comment_id, created_at, draft, confidence, handover)
+                VALUES (:t,:c,:at,:d,:conf,:h)
+                ON CONFLICT(ticket_id, comment_id) DO UPDATE SET
+                    draft=excluded.draft, confidence=excluded.confidence,
+                    handover=excluded.handover
+                """,
+                {"t": ticket_id, "c": comment_id, "at": created_at, "d": draft,
+                 "conf": confidence, "h": 1 if handover else 0},
+            )
+
+    def drafts_since(self, since: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT ticket_id, comment_id, created_at, draft, confidence, handover "
+            "FROM drafts WHERE created_at >= ? ORDER BY created_at",
+            (since,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def set_state(self, key: str, value: str) -> None:
         with self._tx() as conn:
