@@ -295,3 +295,22 @@ def test_a_failed_draft_does_not_escape_the_background_task(api, monkeypatch):
 
     monkeypatch.setattr(suggest, "suggest_for_ticket", boom)
     assert _hook(api, "hook-tok").status_code == 202
+
+
+def test_a_quoted_ticket_id_is_accepted(api, monkeypatch):
+    """Zendesk's JSON body editor flags an unquoted placeholder as invalid JSON,
+    so admins quote it. {{ticket.id}} then arrives as a string."""
+    seen: list[int] = []
+    monkeypatch.setattr(suggest, "suggest_for_ticket",
+                        lambda tid, corpus: seen.append(tid) or "suggested")
+    r = api.post("/zendesk/hook", json={"ticket_id": "31204"},
+                 headers={"Authorization": "Bearer hook-tok"})
+    assert r.status_code == 202
+    assert seen == [31204]
+
+
+def test_a_payload_without_a_ticket_id_is_rejected(api):
+    """Zendesk's Test webhook button sends its own sample payload."""
+    r = api.post("/zendesk/hook", json={"hello": "world"},
+                 headers={"Authorization": "Bearer hook-tok"})
+    assert r.status_code == 422
