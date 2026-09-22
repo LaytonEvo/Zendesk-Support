@@ -14,6 +14,7 @@ phase 3.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -147,6 +148,8 @@ def _run_export(**kwargs: Any) -> None:
         rebuild_search_index()
         log_quality_report()
         log_inbound_addresses()
+        # After the export, so it judges against fresh ticket state.
+        catch_up_suggestions()
     except ConfigError as exc:
         # Expected before the Zendesk credentials are set - a stack trace here
         # would bury the one line that says what to do about it.
@@ -373,6 +376,54 @@ def run_requested_evaluation() -> None:
             log.warning("Evaluation failed: %s", exc)
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# How far back the catch-up looks, and how many tickets it will draft in one
+# pass. Bounded because it runs unattended: a ceiling turns a bad day into a
+# handful of extra notes rather than a hundred.
+CATCH_UP_HOURS = 24
+CATCH_UP_MAX = 10
+
+
+def catch_up_suggestions() -> None:
+    """Draft for recent tickets that never got a suggestion.
+
+    Zendesk delivers a webhook once. Anything that arrives while the service
+    is restarting, or while its credentials are being rejected, is simply
+    lost - and the ticket sits there looking like the assistant considered it
+    and declined. Four tickets went that way in one morning.
+
+    Nothing here needs its own guards: suggest_for_ticket already refuses a
+    ticket it has answered, one with no customer message, and one that is
+    solved. This only decides which tickets to offer it.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        since = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=CATCH_UP_HOURS)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with CorpusStore(path) as store:
+            candidates = store.recent_open_tickets(since, limit=CATCH_UP_MAX * 5)
+    except Exception as exc:
+        log.warning("Could not look for tickets needing a catch-up: %s", exc)
+        return
+
+    drafted = 0
+    for ticket_id in candidates:
+        if drafted >= CATCH_UP_MAX:
+            log.info("catch-up: stopped at the %s-ticket ceiling", CATCH_UP_MAX)
+            break
+        try:
+            outcome = suggest.suggest_for_ticket(ticket_id, corpus_path())
+        except Exception as exc:
+            log.warning("catch-up/ticket %s failed: %s", ticket_id, exc)
+            continue
+        if outcome in ("suggested", "handed to an agent"):
+            drafted += 1
+            log.info("catch-up/ticket %s: %s (missed webhook)", ticket_id, outcome)
+    log.info("catch-up: %s ticket(s) drafted that had been missed", drafted)
 
 
 def kick_off_gmail_import() -> None:

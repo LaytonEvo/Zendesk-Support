@@ -189,6 +189,25 @@ class CorpusStore:
         ).fetchone()
         return row["value"] if row else None
 
+    def recent_open_tickets(self, since: str, limit: int = 50) -> list[int]:
+        """Unresolved tickets touched since a timestamp, newest first.
+
+        Used to find tickets that should have had a suggested reply and did
+        not - a webhook lost while the service was down or its credentials
+        were rejected is never redelivered by Zendesk.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id FROM tickets
+            WHERE COALESCE(updated_at, created_at) >= :since
+              AND COALESCE(status,'') NOT IN ('solved','closed','deleted')
+            ORDER BY COALESCE(updated_at, created_at) DESC
+            LIMIT :limit
+            """,
+            {"since": since, "limit": limit},
+        ).fetchall()
+        return [r["id"] for r in rows]
+
     def tickets_raw(self):
         """Every ticket's stored Zendesk JSON, for one-off diagnostics."""
         return self._conn.execute(

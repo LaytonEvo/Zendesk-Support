@@ -376,3 +376,104 @@ def test_inbound_addresses_are_summarised(tmp_path, monkeypatch, caplog):
     assert "'tickets': 2" in line
     assert "2026-09-01T00:00:00Z" in line             # most recent, not first
     assert "online@evolutiongolf.co.uk" in line
+
+
+# --- catching up on webhooks Zendesk never redelivered -------------------
+#
+# Tickets 1378, 1379 and 1380 arrived while the Zendesk credentials were
+# being rejected. The webhooks fired, failed, and were never sent again, so
+# the tickets sat there looking like the assistant had considered them and
+# declined.
+
+def _corpus_with(tmp_path, tickets):
+    from evogolf_support.corpus.store import CorpusStore
+    path = tmp_path / "c.sqlite3"
+    with CorpusStore(path) as store:
+        for t in tickets:
+            store.upsert_ticket(t)
+    return path
+
+
+def test_recent_open_tickets_excludes_finished_ones(tmp_path):
+    from evogolf_support.corpus.store import CorpusStore
+    path = _corpus_with(tmp_path, [
+        {"id": 1, "status": "open", "updated_at": "2026-09-22T09:00:00Z"},
+        {"id": 2, "status": "solved", "updated_at": "2026-09-22T09:30:00Z"},
+        {"id": 3, "status": "closed", "updated_at": "2026-09-22T09:40:00Z"},
+        {"id": 4, "status": "new", "updated_at": "2026-09-22T09:50:00Z"},
+        {"id": 5, "status": "open", "updated_at": "2026-09-01T09:00:00Z"},  # too old
+    ])
+    with CorpusStore(path) as store:
+        got = store.recent_open_tickets("2026-09-22T00:00:00Z", limit=10)
+    assert got == [4, 1]                      # newest first, unresolved only
+
+
+def test_the_catch_up_drafts_the_missed_tickets(tmp_path, monkeypatch):
+    from evogolf_support.api import app as app_module
+
+    path = _corpus_with(tmp_path, [
+        {"id": 1378, "status": "open", "updated_at": _recent()},
+        {"id": 1379, "status": "open", "updated_at": _recent()},
+    ])
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+    asked = []
+    monkeypatch.setattr(suggest, "suggest_for_ticket",
+                        lambda tid, corpus: asked.append(tid) or "suggested")
+    app_module.catch_up_suggestions()
+    assert sorted(asked) == [1378, 1379]
+
+
+def test_the_catch_up_leaves_already_answered_tickets_alone(tmp_path, monkeypatch):
+    """The existing guards decide; the catch-up only chooses candidates."""
+    from evogolf_support.api import app as app_module
+
+    path = _corpus_with(tmp_path, [{"id": 1, "status": "open", "updated_at": _recent()}])
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+    posted = []
+    monkeypatch.setattr(suggest, "suggest_for_ticket",
+                        lambda tid, corpus: "already noted on this message")
+    app_module.catch_up_suggestions()
+    assert posted == []
+
+
+def test_the_catch_up_has_a_ceiling(tmp_path, monkeypatch):
+    """It runs unattended, so a bad day must cost a handful, not a hundred."""
+    from evogolf_support.api import app as app_module
+
+    path = _corpus_with(tmp_path, [
+        {"id": i, "status": "open", "updated_at": _recent()} for i in range(1, 40)
+    ])
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+    monkeypatch.setattr(app_module, "CATCH_UP_MAX", 3)
+    asked = []
+    monkeypatch.setattr(suggest, "suggest_for_ticket",
+                        lambda tid, corpus: asked.append(tid) or "suggested")
+    app_module.catch_up_suggestions()
+    assert len(asked) == 3
+
+
+def test_one_failure_does_not_stop_the_catch_up(tmp_path, monkeypatch):
+    from evogolf_support.api import app as app_module
+
+    path = _corpus_with(tmp_path, [
+        {"id": 1, "status": "open", "updated_at": _recent()},
+        {"id": 2, "status": "open", "updated_at": _recent()},
+    ])
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+    done = []
+
+    def flaky(tid, corpus):
+        if tid == 2:
+            raise RuntimeError("Anthropic is down")
+        done.append(tid)
+        return "suggested"
+
+    monkeypatch.setattr(suggest, "suggest_for_ticket", flaky)
+    app_module.catch_up_suggestions()
+    assert done == [1]
+
+
+def _recent() -> str:
+    import datetime as dt
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
