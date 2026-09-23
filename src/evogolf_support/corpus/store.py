@@ -203,11 +203,11 @@ class CorpusStore:
                  "conf": confidence, "h": 1 if handover else 0},
             )
 
-    def drafts_since(self, since: str) -> list[dict[str, Any]]:
+    def drafts_between(self, since: str, until: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT ticket_id, comment_id, created_at, draft, confidence, handover "
-            "FROM drafts WHERE created_at >= ? ORDER BY created_at",
-            (since,),
+            "FROM drafts WHERE created_at BETWEEN ? AND ? ORDER BY created_at",
+            (since, until),
         ).fetchall()
         return [dict(r) for r in rows]
 

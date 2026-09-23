@@ -15,6 +15,8 @@ phase 3.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -23,6 +25,7 @@ import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 from typing import Any, AsyncIterator
 
 from fastapi import (
@@ -853,41 +856,123 @@ def _check_admin_query(request: Request, token: str) -> None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token.")
 
 
+SESSION_COOKIE = "evo_dash"
+# Long enough to cover a working day without a second sign-in, short enough
+# that a laptop left open in the shop does not stay signed in for a week.
+SESSION_HOURS = 12
+
+
+def _dashboard_password() -> str:
+    return os.environ.get("DASHBOARD_PASSWORD", "").strip()
+
+
 def _dashboard_token() -> str:
-    """Its own token, so the dashboard can be shared without handing over the
-    keys. ADMIN_TOKEN would also unlock export, reindex and the sweep."""
-    return (os.environ.get("DASHBOARD_TOKEN", "").strip()
-            or _admin_token())
+    """For scripts, not for people. The browser path is the password."""
+    return os.environ.get("DASHBOARD_TOKEN", "").strip()
 
 
-@app.get("/dashboard")
-def admin_dashboard(request: Request, token: str = "", days: int = 30) -> Response:
-    """Read-only view of whether Zendesk is used and the drafts relied on."""
-    expected = _dashboard_token()
+def _sign(expires: int) -> str:
+    """A session cookie signed with the password itself.
+
+    Nothing about the password is recoverable from it, and changing the
+    password invalidates every issued session - which is the behaviour you
+    want from the only lever available when someone leaves.
+    """
+    key = _dashboard_password().encode()
+    digest = hmac.new(key, str(expires).encode(), hashlib.sha256).hexdigest()
+    return f"{expires}.{digest}"
+
+
+def _valid_session(cookie: str | None) -> bool:
+    if not cookie or "." not in cookie or not _dashboard_password():
+        return False
+    raw, _, digest = cookie.partition(".")
+    try:
+        expires = int(raw)
+    except ValueError:
+        return False
+    if expires < int(time.time()):
+        return False
+    expected = _sign(expires).partition(".")[2]
+    return hmac.compare_digest(expected, digest)
+
+
+def _signed_in(request: Request) -> bool:
+    if _valid_session(request.cookies.get(SESSION_COOKIE)):
+        return True
+    # A bearer token still works for anything scripted.
+    token = _dashboard_token()
+    header = request.headers.get("authorization", "")
+    supplied = header[7:] if header.lower().startswith("bearer ") else ""
+    return bool(token and supplied and secrets.compare_digest(supplied, token))
+
+
+@app.post("/dashboard/login")
+async def dashboard_login(request: Request) -> Response:
+    expected = _dashboard_password()
     if not expected:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "Neither DASHBOARD_TOKEN nor ADMIN_TOKEN is set.",
+            "DASHBOARD_PASSWORD is not set, so the dashboard is disabled.",
         )
-    header = request.headers.get("authorization", "")
-    supplied = token or (header[7:] if header.lower().startswith("bearer ") else "")
-    if not supplied or not secrets.compare_digest(supplied, expected):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token.")
+    # Parsed directly rather than through request.form(), which pulls in a
+    # multipart dependency for what is one urlencoded field.
+    body = (await request.body()).decode("utf-8", "replace")
+    supplied = parse_qs(body).get("password", [""])[0]
+    if not secrets.compare_digest(supplied, expected):
+        log.warning("Dashboard sign-in refused")
+        return Response(dashboard.login_page("That password is not right."),
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        media_type="text/html")
 
-    days = max(1, min(int(days), 365))
+    expires = int(time.time()) + SESSION_HOURS * 3600
+    response = RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+    # Secure for every real host. Only a local or test host - where there is
+    # no TLS to require - gets a cookie without it, so production can never
+    # accidentally issue one that travels in clear.
+    local = (request.url.hostname or "") in ("testserver", "localhost", "127.0.0.1")
+    response.set_cookie(
+        SESSION_COOKIE, _sign(expires), max_age=SESSION_HOURS * 3600,
+        httponly=True, secure=not local, samesite="lax", path="/dashboard",
+    )
+    return response
+
+
+@app.get("/dashboard/logout")
+def dashboard_logout() -> Response:
+    response = RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(SESSION_COOKIE, path="/dashboard")
+    return response
+
+
+@app.get("/dashboard")
+def admin_dashboard(request: Request, range: str = "last30",
+                    start: str = "", end: str = "") -> Response:
+    """Read-only view of whether Zendesk is used and the drafts relied on."""
+    if not _dashboard_password() and not _dashboard_token():
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "DASHBOARD_PASSWORD is not set, so the dashboard is disabled.",
+        )
+    if not _signed_in(request):
+        return Response(dashboard.login_page(), status_code=status.HTTP_401_UNAUTHORIZED,
+                        media_type="text/html")
+
     path = corpus_path()
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No corpus yet.")
+    window = metrics.resolve_range(range, start, end)
     try:
         with CorpusStore(path) as store:
-            report = metrics.report(store, days)
+            report = metrics.report(store, window)
     except Exception as exc:
         log.exception("Dashboard failed: %s", exc)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not build the report.")
     return Response(
-        dashboard.render(report, days),
+        dashboard.render(report),
         media_type="text/html",
-        headers={"Referrer-Policy": "no-referrer"},
+        headers={"Referrer-Policy": "no-referrer",
+                 "Cache-Control": "no-store"},
     )
 
 

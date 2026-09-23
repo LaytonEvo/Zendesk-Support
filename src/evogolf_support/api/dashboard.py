@@ -54,8 +54,9 @@ p{margin:0 0 12px;max-width:62ch}p:last-child{margin-bottom:0}
 .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;
          text-transform:uppercase;color:var(--soft);margin:0 0 10px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:22px}
-.hero{display:flex;flex-wrap:wrap;gap:26px;align-items:baseline}
-.hero .big{font-family:var(--display);font-weight:800;font-size:clamp(46px,11vw,76px);
+.heroes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.hero{display:flex;flex-wrap:wrap;gap:20px;align-items:baseline}
+.hero .big{font-family:var(--display);font-weight:800;font-size:clamp(40px,9vw,62px);
            line-height:.95;letter-spacing:-.03em}
 .hero .of{color:var(--soft);font-size:15px;max-width:34ch}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;
@@ -85,6 +86,29 @@ td{padding:10px 10px 10px 0;border-bottom:1px solid var(--hair);font-variant-num
 .verdict{font-size:16px}
 .verdict b{display:block;font-family:var(--display);font-size:19px;margin-bottom:4px}
 .good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.filters a{font-size:13.5px;text-decoration:none;color:var(--soft);
+  border:1px solid var(--line);background:var(--surface);
+  border-radius:999px;padding:6px 13px;white-space:nowrap}
+.filters a:hover{color:var(--ink)}
+.filters a[aria-current]{background:var(--ink);border-color:var(--ink);
+  color:var(--ground);font-weight:600}
+.filters form{display:flex;gap:6px;align-items:center;margin-left:auto;flex-wrap:wrap}
+.filters input[type=date]{font:inherit;font-size:13px;padding:5px 8px;
+  border:1px solid var(--line);border-radius:8px;background:var(--surface);
+  color:var(--ink);color-scheme:light dark}
+.filters button{font:inherit;font-size:13px;font-weight:600;padding:6px 13px;
+  border:1px solid var(--line);border-radius:999px;background:var(--surface);
+  color:var(--ink);cursor:pointer}
+.filters button:hover{border-color:var(--soft)}
+.login{max-width:380px;margin:14vh auto 0;padding:0 20px}
+.login form{background:var(--surface);border:1px solid var(--line);
+  border-radius:12px;padding:24px;display:flex;flex-direction:column;gap:12px}
+.login input{font:inherit;padding:11px 13px;border:1px solid var(--line);
+  border-radius:9px;background:var(--ground);color:var(--ink)}
+.login button{font:inherit;font-weight:600;padding:11px;border:0;border-radius:9px;
+  background:var(--ink);color:var(--ground);cursor:pointer}
+.login .err{color:var(--bad);font-size:14px;margin:0}
 .foot{font-family:var(--mono);font-size:11.5px;color:var(--faint);
       display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
 @media (max-width:520px){.hero{gap:14px}}
@@ -203,34 +227,86 @@ def _verdict(usage: dict[str, Any], a: dict[str, Any]) -> str:
     return "".join(f'<p class="verdict">{line}</p>' for line in lines)
 
 
-def render(report: dict[str, Any], days: int) -> str:
+PRESET_LABELS = [("today", "Today"), ("yesterday", "Yesterday"),
+                 ("week", "Week to date"), ("month", "Month to date"),
+                 ("last7", "Last 7 days"), ("last30", "Last 30 days")]
+
+
+def _filters(window: Any) -> str:
+    current = ' aria-current="page"'
+    links = "".join(
+        '<a href="?range=' + key + '"'
+        + (current if window.key == key else "")
+        + ">" + label + "</a>"
+        for key, label in PRESET_LABELS
+    )
+    today = window.until[:10]
+    return (
+        f'<div class="filters">{links}'
+        f'<form method="get"><input type="hidden" name="range" value="custom">'
+        f'<input type="date" name="start" max="{today}" aria-label="From" required>'
+        f'<input type="date" name="end" max="{today}" aria-label="To">'
+        f'<button type="submit">Go</button></form></div>'
+    )
+
+
+def login_page(error: str = "") -> str:
+    """Shown until someone signs in. Deliberately says nothing about the
+    service beyond its name."""
+    message = f'<p class="err">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html><html lang="en-GB"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Support dashboard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>{CSS}</style></head><body><div class="login">
+<h1 style="font-size:24px;margin:0 0 4px">Support dashboard</h1>
+<p class="sub" style="margin:0 0 16px">Evolution Golf</p>
+<form method="post" action="/dashboard/login">
+  {message}
+  <label for="password" style="font-size:14px;color:var(--soft)">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password"
+         autofocus required>
+  <button type="submit">Sign in</button>
+</form></div></body></html>"""
+
+
+def render(report: dict[str, Any], days: int = 0) -> str:
     usage, a = report["usage"], report["adoption"]
+    window = report["window"]
     pct = a["adoption_percent"]
+    zpct = usage["answered_percent"]
     channels = "".join(
         f"<tr><td>{escape(str(k))}</td><td>{v}</td></tr>"
         for k, v in report["channels"].items()
     ) or '<tr><td colspan="2" style="color:var(--soft)">Nothing yet</td></tr>'
 
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+    return f"""<!doctype html><html lang="en-GB"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Support dashboard</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
 <style>{CSS}</style></head><body><div class="wrap">
 
 <header>
-  <p class="eyebrow">Evolution Golf &middot; last {days} days</p>
+  <p class="eyebrow">Evolution Golf &middot; {escape(window.label)}</p>
   <h1>Support dashboard</h1>
   <p class="sub">Is Zendesk being used, and are the drafted replies being relied on?</p>
 </header>
 
-<div class="card">
-  <div class="hero">
+{_filters(window)}
+
+<div class="heroes">
+  <div class="card"><div class="hero">
+    <div class="big">{zpct if zpct is not None else "—"}{"%" if zpct is not None else ""}</div>
+    <div class="of">of tickets were answered <b>in Zendesk</b>.<br>
+      A ticket answered from Gmail instead counts as unanswered here — which is
+      the point.</div>
+  </div></div>
+  <div class="card"><div class="hero">
     <div class="big">{pct if pct is not None else "—"}{"%" if pct is not None else ""}</div>
-    <div class="of">of replies started from the suggested draft.<br>
-      Measured by comparing each draft with the reply the agent actually sent —
-      not by asking. It counts only replies that clearly began as the draft, so
-      it understates rather than flatters.</div>
-  </div>
+    <div class="of">of replies started from the <b>suggested draft</b>.<br>
+      Measured by comparing each draft with what was actually sent, so it
+      understates rather than flatters.</div>
+  </div></div>
 </div>
 
 <section>
@@ -243,8 +319,8 @@ def render(report: dict[str, Any], days: int) -> str:
   <p class="sub" style="margin-bottom:14px">Tickets arriving, and replies going out from Zendesk.</p>
   <div class="tiles">
     {_tile(usage["tickets"], "tickets arrived")}
+    {_tile(str(zpct) + "%" if zpct is not None else "—", "answered in Zendesk")}
     {_tile(usage["tickets_per_working_day"], "per working day")}
-    {_tile(usage["tickets_answered"], "answered in Zendesk")}
     {_tile(usage["agent_replies"], "replies sent")}
     {_tile(usage["unanswered"], "no reply in Zendesk")}
   </div>
@@ -278,7 +354,8 @@ def render(report: dict[str, Any], days: int) -> str:
   from the online@ mailbox, not new Zendesk activity.</p></div>
 </section>
 
-<p class="foot"><span>Generated {escape(report["generated_at"])}</span>
+<p class="foot"><span>{escape(window.label)} &middot; generated {escape(report["generated_at"])}
+&middot; <a href="/dashboard/logout" style="color:inherit">sign out</a></span>
 <span>Counts only &middot; no customer details</span></p>
 
 </div></body></html>"""
