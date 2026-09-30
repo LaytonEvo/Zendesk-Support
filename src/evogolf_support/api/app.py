@@ -42,7 +42,8 @@ from ..corpus.evidence import threads_for
 from ..corpus.quality import report as quality_report
 from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.themes import report as theme_report
-from ..mining.discover import Taxonomy, classify_tickets, discover_themes
+from ..mining.discover import (Taxonomy, classify_rows, classify_tickets,
+                               discover_themes, unthemed_tickets)
 from ..mining.run import GUIDE_KEY, run_mining
 from ..drafting.generate import Draft, draft_reply
 from ..drafting.retrieve import rebuild_index
@@ -154,7 +155,8 @@ def _run_export(**kwargs: Any) -> None:
         rebuild_search_index()
         log_quality_report()
         log_inbound_addresses()
-        # After the export, so it judges against fresh ticket state.
+        # After the export, so both work on fresh ticket state.
+        classify_new_tickets()
         catch_up_suggestions()
     except ConfigError as exc:
         # Expected before the Zendesk credentials are set - a stack trace here
@@ -389,6 +391,39 @@ def run_requested_evaluation() -> None:
 # handful of extra notes rather than a hundred.
 CATCH_UP_HOURS = 24
 CATCH_UP_MAX = 10
+
+
+def classify_new_tickets() -> None:
+    """Give a theme to anything that does not have one.
+
+    Themes were assigned once, during the original discovery run. Every
+    ticket that has arrived since - and all 377 conversations imported from
+    the online@ mailbox - had none, so retrieval fell back to plain text
+    search for them. That still works; it just finds worse examples than
+    searching inside the right theme would.
+
+    Runs after each export so it keeps up on its own, rather than being a
+    job someone has to remember.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            raw = store.get_state(TAXONOMY_KEY)
+            if not raw:
+                return                      # discovery has not run yet
+            rows = unthemed_tickets(store)
+            if not rows:
+                return
+            taxonomy = Taxonomy.model_validate_json(raw)
+            log.info("Classifying %s ticket(s) with no theme", len(rows))
+            assignments = classify_rows(rows, taxonomy)
+            if assignments:
+                store.set_ticket_themes(assignments)
+            log.info("Themed %s of %s", len(assignments), len(rows))
+    except Exception as exc:
+        log.warning("Could not classify new tickets: %s", exc)
 
 
 def catch_up_suggestions() -> None:

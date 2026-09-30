@@ -77,3 +77,55 @@ def test_one_off_subject_words_are_not_reported(tmp_path):
     assert "patel" not in rendered
     assert "jayman" not in rendered
     assert words.get("motocaddy") == 4
+
+
+# --- keeping themes up to date -------------------------------------------
+#
+# Themes were assigned once, during discovery. Everything that arrived
+# afterwards - and all 377 conversations imported from the online@ mailbox -
+# had none, so retrieval fell back to plain text search for them.
+
+def _theme_corpus(tmp_path, tickets, themed=()):
+    from evogolf_support.corpus.store import CorpusStore
+    path = tmp_path / "c.sqlite3"
+    with CorpusStore(path) as store:
+        for t in tickets:
+            store.upsert_ticket(t)
+        if themed:
+            store.set_ticket_themes(dict(themed))
+    return path
+
+
+def test_only_unthemed_tickets_are_picked_up(tmp_path):
+    from evogolf_support.corpus.store import CorpusStore
+    from evogolf_support.mining.discover import unthemed_tickets
+
+    path = _theme_corpus(tmp_path, [
+        {"id": 1, "subject": "Already sorted", "status": "open"},
+        {"id": 2, "subject": "Needs a theme", "status": "open"},
+        {"id": 3, "subject": "Deleted one", "status": "deleted"},
+    ], themed=[(1, "delivery_tracking")])
+
+    with CorpusStore(path) as store:
+        rows = unthemed_tickets(store)
+    assert [r["id"] for r in rows] == [2]        # not 1, not the deleted 3
+
+
+def test_a_backlog_is_capped_per_pass(tmp_path):
+    """A boot should not turn into a long unattended job; the rest waits."""
+    from evogolf_support.corpus.store import CorpusStore
+    from evogolf_support.mining.discover import unthemed_tickets
+
+    path = _theme_corpus(tmp_path, [{"id": i, "subject": f"t{i}", "status": "open"}
+                              for i in range(1, 60)])
+    with CorpusStore(path) as store:
+        assert len(unthemed_tickets(store, limit=25)) == 25
+
+
+def test_classifying_nothing_costs_nothing(tmp_path, monkeypatch):
+    """The common case once it has caught up: no API call at all."""
+    from evogolf_support.mining import discover
+
+    monkeypatch.setattr(discover, "client",
+                        lambda: pytest.fail("must not call the API"))
+    assert discover.classify_rows([], object()) == {}

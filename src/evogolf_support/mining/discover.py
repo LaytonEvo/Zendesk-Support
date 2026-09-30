@@ -121,12 +121,33 @@ def discover_themes(store: CorpusStore) -> Taxonomy:
     return taxonomy
 
 
-def classify_tickets(store: CorpusStore, taxonomy: Taxonomy) -> dict[int, str]:
-    """Assign every ticket to one of the discovered themes."""
-    rows = store._conn.execute(  # noqa: SLF001
-        "SELECT id, subject, tags FROM tickets WHERE status != 'deleted' ORDER BY id"
+# A ceiling per pass. Classification is cheap per ticket but a backlog of
+# hundreds should not turn one boot into a long unattended job; whatever is
+# left is picked up on the next pass.
+CLASSIFY_CEILING = 400
+
+
+def unthemed_tickets(store: CorpusStore, limit: int = CLASSIFY_CEILING) -> list[Any]:
+    """Tickets with no theme yet - new arrivals and the Gmail import.
+
+    Retrieval falls back to plain text search for these, which works but
+    finds examples less precisely than searching within the right theme.
+    """
+    return store._conn.execute(  # noqa: SLF001
+        """
+        SELECT t.id, t.subject, t.tags FROM tickets t
+        LEFT JOIN ticket_themes th ON th.ticket_id = t.id
+        WHERE t.status != 'deleted' AND th.ticket_id IS NULL
+        ORDER BY t.id DESC LIMIT ?
+        """,
+        (limit,),
     ).fetchall()
 
+
+def classify_rows(rows: list[Any], taxonomy: Taxonomy) -> dict[int, str]:
+    """Assign a given set of tickets to themes."""
+    if not rows:
+        return {}
     taxonomy_text = "\n".join(
         f"- {t.key}: {t.label} - {t.definition}" for t in taxonomy.themes
     )
@@ -152,8 +173,14 @@ def classify_tickets(store: CorpusStore, taxonomy: Taxonomy) -> dict[int, str]:
         for item in response.parsed_output.assignments:
             if item.theme_key in valid_keys:
                 assignments[item.ticket_id] = item.theme_key
-        log.info(
-            "Classified %s/%s tickets", len(assignments), len(rows)
-        )
+        log.info("Classified %s/%s tickets", len(assignments), len(rows))
 
     return assignments
+
+
+def classify_tickets(store: CorpusStore, taxonomy: Taxonomy) -> dict[int, str]:
+    """Assign every ticket to one of the discovered themes."""
+    rows = store._conn.execute(  # noqa: SLF001
+        "SELECT id, subject, tags FROM tickets WHERE status != 'deleted' ORDER BY id"
+    ).fetchall()
+    return classify_rows(rows, taxonomy)
