@@ -304,8 +304,8 @@ def render(report: dict[str, Any], days: int = 0) -> str:
   <div class="card"><div class="hero">
     <div class="big">{pct if pct is not None else "—"}{"%" if pct is not None else ""}</div>
     <div class="of">of replies started from the <b>suggested draft</b>.<br>
-      Measured by comparing each draft with what was actually sent, so it
-      understates rather than flatters.</div>
+      Measured by comparing each draft with what was actually sent, with
+      greetings and sign-offs stripped so boilerplate cannot flatter it.</div>
   </div></div>
 </div>
 
@@ -336,9 +336,11 @@ def render(report: dict[str, Any], days: int = 0) -> str:
 <section>
   <h2>How the drafts were used</h2>
   <div class="card">{_adoption_split(a)}
-  <p class="note">A reply that keeps the facts but rewrites every sentence
-  scores about the same as one written independently, so "little or no overlap"
-  means exactly that and nothing more. Read the top number as a floor.<br>
+  <p class="note">Greetings and sign-offs are stripped before comparing, so
+  the shared "Many thanks, Evo Support Team" cannot make two unrelated replies
+  look alike. "Edited then sent" means the same substance reached the customer
+  — it cannot tell a reworded draft from an agent who looked the same facts up
+  themselves.<br>
   {a["drafts"]} drafts written &middot; {a["judged"]} replied to and
   measurable &middot; {a["no_reply_yet"]} awaiting a reply &middot;
   {a["handover"]} handed straight to an agent by policy, so no draft was written.

@@ -65,29 +65,41 @@ def test_a_trivially_tweaked_reply_still_counts_as_sent_as_written(store):
     assert a["used_as_is"] == 1
 
 
-def test_a_full_reword_is_reported_as_low_overlap_not_as_ignored(store):
-    """The honest limit of this measure.
-
-    A reply keeping the draft's facts but rewriting every sentence scores
-    ~0.32; an unrelated reply that merely shares the sign-off scores ~0.29.
-    Nothing separates them, so the bottom bucket claims no intent - it says
-    the wording did not survive, and the headline is a floor on adoption.
-    """
-    edited = ("Morning Mr Whitfield,\n\nApologies for the wait on this one. Your "
-              "Motocaddy went out with DPD on the 16th, tracking 15488234901, and "
-              "it has stalled at their depot. I have put a priority trace on it "
-              "this morning and will come back to you the moment they reply.\n\n"
+def test_a_reword_of_similar_length_counts_as_edited(store):
+    """Keeps the facts, changes the wording, roughly the same length: 0.79."""
+    reword = ("Hi Craig,\n\nYour trolley went out on the 16th with DPD, tracking "
+              "15488234901, and I am chasing them today.\n\n"
               "Many thanks, Evo Support Team")
-    _ticket(store, 1, reply=edited)
-    a = metrics.draft_adoption(store, W)
-    assert a["low_overlap"] == 1
+    _ticket(store, 1, reply=reword)
+    assert metrics.draft_adoption(store, W)["edited"] == 1
 
 
-def test_an_unrelated_reply_does_not_count(store):
-    _ticket(store, 1, reply="Hi, I've spoken to the warehouse and it goes out "
-                            "tomorrow. Sorry for the wait.")
-    a = metrics.draft_adoption(store, W)
-    assert a["low_overlap"] == 1 and a["adoption_percent"] == 0
+def test_unrelated_replies_stay_below_the_band_at_any_length(store):
+    """Both a short and a long unrelated reply must fail to register."""
+    short = ("Hi Craig,\n\nWe have refunded you in full, sorry again for the "
+             "trouble.\n\nMany thanks, Evo Support Team")
+    long = ("Hi Craig,\n\nWe have refunded you in full and added a credit note to "
+            "your account for the inconvenience caused by this whole episode, which "
+            "should show within five working days.\n\nMany thanks, Evo Support Team")
+    assert metrics.similarity(DRAFT, short) < metrics.EDITED
+    assert metrics.similarity(DRAFT, long) < metrics.EDITED
+
+
+def test_a_much_longer_reply_understates_and_that_is_the_chosen_error(store):
+    """The known limit, pinned so it is a decision rather than a surprise.
+
+    An agent who sends the draft and adds several sentences scores ~0.33,
+    below the band, even though every word of the draft survived. A
+    containment measure would catch it but would also lift a long unrelated
+    reply to 0.39 - near enough the 0.45 line to inflate the headline.
+    Understating is the safer error, so this case is accepted.
+    """
+    used_then_expanded = (
+        "Morning Mr W,\n\nApologies for the wait. Your Motocaddy went out with DPD "
+        "on the 16th, tracking 15488234901, and it has stalled at their depot. I "
+        "have put a priority trace on it this morning and will come back the moment "
+        "they reply.\n\nMany thanks, Evo Support Team")
+    assert metrics.similarity(DRAFT, used_then_expanded) < metrics.EDITED
 
 
 def test_a_draft_with_no_reply_yet_is_not_counted_either_way(store):
@@ -170,6 +182,26 @@ def test_low_adoption_is_called_out_plainly(store):
     html = dashboard.render(metrics.report(store, W))
     assert "Little sign the drafts are being used" in html
     assert "rewritten so heavily" in html          # the caveat travels with it
+
+
+def test_shared_boilerplate_cannot_fake_adoption(store):
+    """Found live: every draft and reply ends "Many thanks, Evo Support Team".
+    Left in, two unrelated one-liners scored 0.68 against each other - above
+    the edited threshold - which inflated adoption rather than understating it.
+    """
+    short = "Hi Craig,\n\nYour order went out yesterday.\n\nMany thanks, Evo Support Team"
+    unrelated = "Hi Craig,\n\nWe have refunded you in full.\n\nMany thanks, Evo Support Team"
+    assert metrics.similarity(short, unrelated) < metrics.EDITED
+    _ticket(store, 1, reply=unrelated, draft=short)
+    assert metrics.draft_adoption(store, W)["low_overlap"] == 1
+
+
+def test_a_different_sign_off_does_not_hide_a_copied_draft(store):
+    """An agent who swaps the sign-off has still sent our draft."""
+    copied = "Hi Craig,\n\nYour order went out yesterday.\n\nKind regards, Brad"
+    short = "Hi Craig,\n\nYour order went out yesterday.\n\nMany thanks, Evo Support Team"
+    _ticket(store, 1, reply=copied, draft=short)
+    assert metrics.draft_adoption(store, W)["used_as_is"] == 1
 
 
 def test_the_page_carries_no_customer_details(store):

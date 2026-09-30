@@ -3,15 +3,25 @@
 Two questions, and the second is the one that needs evidence rather than
 opinion. Every draft is kept, so it can be compared against the reply the
 agent actually sent afterwards. A reply that closely
-matches the draft was used; one that shares little with it either was not,
-or was rewritten so heavily that nothing of the draft survives.
+matches the draft was used; one that shares little with it was not.
 
-That last distinction cannot be made and is not claimed. A reply keeping the
-draft's facts but rewriting every sentence scores about the same as an
-unrelated reply that happens to share the sign-off - measured, both land
-near 0.3. So the third bucket is reported as "little or no overlap" rather
-than "ignored", and the number is read as a floor on adoption, not a verdict
-on the team.
+The greeting and sign-off are stripped before comparing. Left in, they are
+most of a short message: two unrelated one-liners scored 0.68 against each
+other, above the "edited" threshold, which inflated adoption rather than
+understating it.
+
+Two things are still not claimed. A reply that keeps the draft's facts but
+rewrites the wording scores about the same as one written by an agent who
+looked those facts up in Shopify themselves - so the middle bucket means
+"the same substance reached the customer", not "the draft was copied". And
+the comparison is symmetric, so an agent who used the draft and then added
+several sentences of their own scores low (0.33 on a measured case) even
+though every word of the draft survived.
+
+A containment measure would catch that second case, but it also lifts a long
+unrelated reply from 0.29 to 0.39 - close enough to the 0.45 band to start
+inflating the headline. Understating is the safer error here, so the
+symmetric measure stays.
 
 Counts only. No customer names or addresses leave this module.
 """
@@ -31,18 +41,37 @@ from .corpus.store import CorpusStore
 log = logging.getLogger(__name__)
 
 # How close a sent reply has to be to the draft to count as used. Measured
-# against real drafts: a changed greeting scores ~0.95, a full reword ~0.3,
-# an unrelated reply sharing only the sign-off ~0.29. The first is reliably
-# detectable; the last two are not distinguishable from each other, which is
-# why the bottom bucket claims nothing about intent.
+# against real drafts, with boilerplate stripped: sent as written or with the
+# greeting changed scores 1.00; a full reword keeping the facts scores 0.53;
+# an unrelated reply sharing the sign-off scores 0.24; a one-line brush-off
+# scores 0.14. The bands below sit in the gaps.
 USED_AS_IS = 0.80
 EDITED = 0.45
 
 _WS = re.compile(r"\s+")
 
+# Every draft and every reply now opens with a greeting and closes with the
+# same mandated sign-off. Left in, that boilerplate is most of a short
+# message, and two unrelated one-liners score 0.68 against each other -
+# above the "edited" threshold. Measured, not assumed. Stripping it means
+# the comparison is of what was actually said.
+_GREETING = re.compile(
+    r"^\s*(hi|hey|hello|dear|good\s+(morning|afternoon|evening)|morning|afternoon|evening)"
+    r"\b[^\n]{0,40}?[,!]?\s*\n", re.IGNORECASE)
+_SIGNOFF = re.compile(
+    r"\n\s*(many\s+thanks|kind\s+regards|best\s+regards|regards|thanks|cheers|"
+    r"all\s+the\s+best)\b[\s\S]{0,60}$", re.IGNORECASE)
+
+
+def strip_boilerplate(text: str) -> str:
+    text = (text or "").strip()
+    text = _GREETING.sub("", text, count=1)
+    text = _SIGNOFF.sub("", text, count=1)
+    return text.strip()
+
 
 def _normalise(text: str) -> str:
-    return _WS.sub(" ", (text or "").strip().lower())
+    return _WS.sub(" ", strip_boilerplate(text).lower())
 
 
 def similarity(draft: str, sent: str) -> float:
