@@ -103,7 +103,7 @@ HOW THE TEAM WRITES ABOUT THIS KIND OF TICKET
 
 SIMILAR PAST TICKETS AND HOW THEY WERE ANSWERED
 {examples}
-
+{corrections}
 THE TICKET TO ANSWER
 Subject: {subject}
 
@@ -112,6 +112,10 @@ Subject: {subject}
 Write the reply. Rules:
 - Follow the settled policy above even where a past example did otherwise, \
 and say which rule ids you relied on.
+- Where a correction is shown above, the team saw a suggestion like yours \
+and chose to send something else. Take the reply they sent as the better \
+answer and write in that direction. It is more recent and more deliberate \
+than any older example.
 - Match the team's voice, not a generic support register.
 - Never invent an order status, a date, a stock position, a price or a refund \
 figure. Where the reply needs one, leave a clear placeholder in square \
@@ -132,6 +136,25 @@ pre-empt a request the customer has not made.
 markdown escapes, backslashes or HTML entities. Separate sentences with full \
 stops and paragraphs with blank lines - never with a slash.
 """
+
+
+# Enough to show a direction without crowding out the retrieved examples.
+CORRECTIONS_SHOWN = 3
+
+
+def _render_corrections(corrections: list[dict]) -> str:
+    """Cases where the team rewrote a suggestion rather than sending it.
+
+    Worth more than an ordinary example: the same customer message, an
+    attempt at it, and the reply a person chose instead.
+    """
+    if not corrections:
+        return ""
+    from ..learning import render_for_prompt
+    return ("\nWHERE THE TEAM REWROTE A SUGGESTED REPLY\n"
+            "These are recent cases where a suggestion was not sent as written. "
+            "The reply the team sent is the one to learn from.\n"
+            + render_for_prompt(corrections) + "\n")
 
 
 def _render_examples(examples: list[dict]) -> str:
@@ -195,10 +218,12 @@ def draft_reply(
         ).fetchone()
         theme = row["theme_key"] if row else None
 
+    corrections = store.recent_corrections(theme, limit=CORRECTIONS_SHOWN)
     prompt = PROMPT.format(
         policy=as_prompt_text(),
         guide=_theme_guide(store, theme),
         examples=_render_examples(examples),
+        corrections=_render_corrections(corrections),
         subject=subject,
         body=body,
     )
@@ -217,8 +242,9 @@ def draft_reply(
     result.draft = _clean_output(result.draft)
     result.agent_notes = [_clean_output(n) for n in result.agent_notes]
     log.info(
-        "Drafted for theme=%s: handover=%s confidence=%s rules=%s tickets=%s",
+        "Drafted for theme=%s: handover=%s confidence=%s rules=%s tickets=%s "
+        "corrections=%s",
         theme, result.hand_to_agent, result.confidence,
-        result.rules_applied, result.tickets_referenced,
+        result.rules_applied, result.tickets_referenced, len(corrections),
     )
     return result

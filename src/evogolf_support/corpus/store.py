@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_created ON drafts(created_at);
 
+CREATE TABLE IF NOT EXISTS corrections (
+    ticket_id   INTEGER NOT NULL,
+    comment_id  INTEGER NOT NULL,
+    created_at  TEXT,
+    theme_key   TEXT,
+    question    TEXT,
+    suggested   TEXT,
+    sent        TEXT,
+    similarity  REAL,
+    PRIMARY KEY (ticket_id, comment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_corrections_created ON corrections(created_at);
+CREATE INDEX IF NOT EXISTS idx_corrections_theme ON corrections(theme_key);
+
 CREATE TABLE IF NOT EXISTS export_state (
     key     TEXT PRIMARY KEY,
     value   TEXT
@@ -226,6 +240,92 @@ class CorpusStore:
             "SELECT value FROM export_state WHERE key = ?", (key,)
         ).fetchone()
         return row["value"] if row else None
+
+    def record_correction(self, ticket_id: int, comment_id: int, created_at: str,
+                          theme_key: str | None, question: str, suggested: str,
+                          sent: str, similarity: float) -> None:
+        """Keep a case where the team did not send what was suggested.
+
+        This is the most direct evidence there is of how they want these
+        answered: the same customer message, our attempt, and the reply a
+        person actually chose to send instead.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO corrections (ticket_id, comment_id, created_at,
+                    theme_key, question, suggested, sent, similarity)
+                VALUES (:t,:c,:at,:th,:q,:sug,:sent,:sim)
+                ON CONFLICT(ticket_id, comment_id) DO UPDATE SET
+                    sent=excluded.sent, similarity=excluded.similarity,
+                    theme_key=excluded.theme_key
+                """,
+                {"t": ticket_id, "c": comment_id, "at": created_at,
+                 "th": theme_key, "q": question, "sug": suggested,
+                 "sent": sent, "sim": similarity},
+            )
+
+    def corrected_comment_ids(self) -> set[int]:
+        return {r["comment_id"] for r in
+                self._conn.execute("SELECT comment_id FROM corrections")}
+
+    def recent_corrections(self, theme: str | None, limit: int = 3
+                           ) -> list[dict[str, Any]]:
+        """The newest corrections, preferring the ticket's own theme.
+
+        Recency matters more than similarity here: a correction is a signal
+        about how the team wants things answered now, and the most recent
+        ones reflect the current position.
+        """
+        rows: list[Any] = []
+        if theme:
+            rows = self._conn.execute(
+                "SELECT * FROM corrections WHERE theme_key = ? "
+                "ORDER BY created_at DESC LIMIT ?", (theme, limit)
+            ).fetchall()
+        if len(rows) < limit:
+            seen = {r["comment_id"] for r in rows}
+            extra = self._conn.execute(
+                "SELECT * FROM corrections ORDER BY created_at DESC LIMIT ?",
+                (limit * 3,)
+            ).fetchall()
+            for row in extra:
+                if row["comment_id"] not in seen:
+                    rows.append(row)
+                if len(rows) >= limit:
+                    break
+        return [dict(r) for r in rows[:limit]]
+
+    def clear_themes_for_reconsideration(self, themes: set[str],
+                                         tags: set[str]) -> int:
+        """Drop the theme on tickets that a newly added theme might claim.
+
+        A ticket keeps whatever theme it was given, so one added later never
+        wins anything already assigned. Clearing puts those tickets back in
+        front of the classifier once.
+        """
+        if not themes and not tags:
+            return 0
+        clauses, params = [], []
+        if themes:
+            marks = ",".join("?" for _ in themes)
+            clauses.append(f"th.theme_key IN ({marks})")
+            params.extend(sorted(themes))
+        for tag in sorted(tags):
+            clauses.append("t.tags LIKE ?")
+            params.append(f'%"{tag}"%')
+        with self._tx() as conn:
+            cursor = conn.execute(
+                f"""
+                DELETE FROM ticket_themes WHERE ticket_id IN (
+                    SELECT th.ticket_id FROM ticket_themes th
+                    JOIN tickets t ON t.id = th.ticket_id
+                    WHERE {" OR ".join(clauses)}
+                )
+                """,
+                params,
+            )
+            return cursor.rowcount or 0
 
     def recent_open_tickets(self, since: str, limit: int = 50) -> list[int]:
         """Unresolved tickets touched since a timestamp, newest first.

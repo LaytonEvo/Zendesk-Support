@@ -42,8 +42,9 @@ from ..corpus.evidence import threads_for
 from ..corpus.quality import report as quality_report
 from ..corpus.reclean import needs_reclean, reclean
 from ..corpus.themes import report as theme_report
-from ..mining.discover import (Taxonomy, classify_rows, classify_tickets,
-                               discover_themes, unthemed_tickets)
+from ..mining.discover import (Taxonomy, Theme, classify_rows,
+                               classify_tickets, discover_themes,
+                               unthemed_tickets)
 from ..mining.run import GUIDE_KEY, run_mining
 from ..drafting.generate import Draft, draft_reply
 from ..drafting.retrieve import rebuild_index
@@ -59,7 +60,7 @@ GMAIL_IMPORTED_KEY = "gmail_history_imported"
 from .. import slack
 from ..zendesk import suggest
 from ..gmail import ingest as gmail_ingest, oauth as google_oauth
-from .. import metrics
+from .. import learning, metrics
 from . import dashboard
 
 log = logging.getLogger(__name__)
@@ -156,7 +157,9 @@ def _run_export(**kwargs: Any) -> None:
         log_quality_report()
         log_inbound_addresses()
         # After the export, so both work on fresh ticket state.
+        add_required_themes()
         classify_new_tickets()
+        collect_corrections()
         catch_up_suggestions()
     except ConfigError as exc:
         # Expected before the Zendesk credentials are set - a stack trace here
@@ -391,6 +394,85 @@ def run_requested_evaluation() -> None:
 # handful of extra notes rather than a hundred.
 CATCH_UP_HOURS = 24
 CATCH_UP_MAX = 10
+
+
+# Themes the business has asked for, which discovery could not have proposed
+# because the evidence for them was not in Zendesk at the time. Adding one
+# here is a data change, not a code change: it is applied to the stored
+# taxonomy on boot and the affected tickets are re-opened for classification.
+REQUIRED_THEMES = [
+    Theme(
+        key="custom_fitting",
+        label="Custom fitting",
+        definition=(
+            "Booking, arranging or discussing a club fitting session, and the "
+            "specification, quoting, ordering and collection of custom-built "
+            "clubs that follows from one. Not general questions about sizes or "
+            "specifications of stock items, which are product_sizing."
+        ),
+    ),
+]
+# Once the new theme exists, tickets that could plausibly belong to it are
+# cleared so the classifier reconsiders them. Left alone, they would keep
+# whatever theme they were given when the option did not exist.
+RECONSIDER_THEMES = {"product_sizing"}
+RECONSIDER_TAGS = {"custom_fitting_enquiries"}
+THEMES_ADDED_KEY = "required_themes_added"
+
+
+def add_required_themes() -> None:
+    """Put the business's own themes into the stored taxonomy.
+
+    The taxonomy was discovered from 556 Zendesk tickets, at a point when the
+    custom fitting work lived entirely in a Gmail inbox and was invisible to
+    it. No amount of re-running discovery on that data would have produced a
+    fitting theme, so it is stated rather than inferred.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            raw = store.get_state(TAXONOMY_KEY)
+            if not raw:
+                return
+            taxonomy = Taxonomy.model_validate_json(raw)
+            have = {t.key for t in taxonomy.themes}
+            missing = [t for t in REQUIRED_THEMES if t.key not in have]
+            if not missing:
+                return
+            taxonomy.themes.extend(missing)
+            store.set_state(TAXONOMY_KEY, taxonomy.model_dump_json())
+            names = ", ".join(t.key for t in missing)
+            log.info("Added %s to the taxonomy", names)
+
+            if store.get_state(THEMES_ADDED_KEY):
+                return
+            cleared = store.clear_themes_for_reconsideration(
+                RECONSIDER_THEMES, RECONSIDER_TAGS)
+            store.set_state(THEMES_ADDED_KEY, names)
+            log.info(
+                "Cleared the theme on %s ticket(s) so they are reconsidered "
+                "against the new one", cleared
+            )
+    except Exception as exc:
+        log.warning("Could not add the required themes: %s", exc)
+
+
+def collect_corrections() -> None:
+    """Keep the replies the team sent instead of the suggestion.
+
+    Runs after the export, because the agent's reply only exists in the
+    corpus once it has been pulled in.
+    """
+    try:
+        path = corpus_path()
+        if not path.exists():
+            return
+        with CorpusStore(path) as store:
+            learning.collect(store)
+    except Exception as exc:
+        log.warning("Could not collect corrections: %s", exc)
 
 
 def classify_new_tickets() -> None:

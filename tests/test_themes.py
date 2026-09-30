@@ -129,3 +129,70 @@ def test_classifying_nothing_costs_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(discover, "client",
                         lambda: pytest.fail("must not call the API"))
     assert discover.classify_rows([], object()) == {}
+
+
+# --- a theme the business asked for --------------------------------------
+#
+# Discovery ran on 556 Zendesk tickets, when the custom fitting work lived
+# entirely in a Gmail inbox. No amount of re-running it on that data would
+# have produced a fitting theme, so it is stated rather than inferred.
+
+def test_a_required_theme_is_added_to_the_stored_taxonomy(tmp_path, monkeypatch):
+    from evogolf_support.corpus.store import CorpusStore
+    from evogolf_support.api import app as app_module
+    from evogolf_support.mining.discover import Taxonomy, Theme
+
+    path = tmp_path / "c.sqlite3"
+    existing = Taxonomy(themes=[Theme(key="product_sizing", label="Sizing",
+                                      definition="Sizes.")], notes="")
+    with CorpusStore(path) as store:
+        store.set_state(app_module.TAXONOMY_KEY, existing.model_dump_json())
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+
+    app_module.add_required_themes()
+    with CorpusStore(path) as store:
+        after = Taxonomy.model_validate_json(store.get_state(app_module.TAXONOMY_KEY))
+    assert "custom_fitting" in {t.key for t in after.themes}
+    assert "product_sizing" in {t.key for t in after.themes}   # nothing lost
+
+
+def test_adding_it_twice_changes_nothing(tmp_path, monkeypatch):
+    from evogolf_support.corpus.store import CorpusStore
+    from evogolf_support.api import app as app_module
+    from evogolf_support.mining.discover import Taxonomy, Theme
+
+    path = tmp_path / "c.sqlite3"
+    with CorpusStore(path) as store:
+        store.set_state(app_module.TAXONOMY_KEY,
+                        Taxonomy(themes=[Theme(key="a", label="A", definition="x")],
+                                 notes="").model_dump_json())
+    monkeypatch.setattr(app_module, "corpus_path", lambda: path)
+    app_module.add_required_themes()
+    app_module.add_required_themes()
+    with CorpusStore(path) as store:
+        after = Taxonomy.model_validate_json(store.get_state(app_module.TAXONOMY_KEY))
+    assert [t.key for t in after.themes].count("custom_fitting") == 1
+
+
+def test_tickets_that_might_belong_are_reopened_for_classification(tmp_path):
+    """A ticket keeps whatever theme it was given, so a theme added later
+    never wins anything already assigned unless those are cleared."""
+    from evogolf_support.corpus.store import CorpusStore
+
+    path = tmp_path / "c.sqlite3"
+    with CorpusStore(path) as store:
+        store.upsert_ticket({"id": 1, "subject": "Driver fitting", "status": "open",
+                             "tags": ["custom_fitting_enquiries"]})
+        store.upsert_ticket({"id": 2, "subject": "What size grip", "status": "open",
+                             "tags": []})
+        store.upsert_ticket({"id": 3, "subject": "Refund", "status": "open", "tags": []})
+        store.set_ticket_themes({1: "returns_refunds", 2: "product_sizing",
+                                 3: "returns_refunds"})
+        cleared = store.clear_themes_for_reconsideration(
+            {"product_sizing"}, {"custom_fitting_enquiries"})
+
+    assert cleared == 2                      # the fitting-tagged one and the sizing one
+    with CorpusStore(path) as store:
+        left = store._conn.execute(
+            "SELECT ticket_id FROM ticket_themes").fetchall()
+    assert [r["ticket_id"] for r in left] == [3]   # the unrelated one is untouched
